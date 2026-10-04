@@ -1204,82 +1204,55 @@ jobs:
             }
 
             var _exec = [];
-            function _rec(cmd, tag, errno, outLen, errLen){
-              _exec.push(tag + ' | ' + cmd.slice(0,90) + ' | errno=' + errno + ' | outLen=' + outLen + ' | errLen=' + errLen);
+            function _rec(cmd, tag, outLen, errLen){
+              _exec.push(tag + ' | ' + cmd.slice(0,90) + ' | outLen=' + outLen + ' | errLen=' + errLen);
               if (_exec.length > 40) _exec.shift();
             }
 
-            function kx(cmd, to){
-              return new Promise(function(res){
-                var done=false;
-                function fin(tag, a, b, c){
-                  if (done) return; done=true;
-                  var errno = (a==null)?0:(Number(a)||0);
-                  var out = (b==null)?'':String(b);
-                  var err = (c==null)?'':String(c);
-                  _rec(cmd, tag, errno, out.length, err.length);
-                  res({errno:errno, stdout:out, stderr:err, tag:tag});
-                }
-                setTimeout(function(){ fin('timeout', -2, '', ''); }, to||12000);
-                if (!KS || typeof KS.exec !== 'function') { fin('noksu', -1, '', ''); return; }
+            function b64decode(s){
+              try {
+                var bin = atob(String(s).replace(/\s+/g,''));
+                try { return decodeURIComponent(escape(bin)); } catch(e2) { return bin; }
+              } catch(e) { return ''; }
+            }
 
-                var arity = KS.exec.length;
-                try {
-                  if (arity <= 1) {
-                    var r = KS.exec(cmd);
-                    if (r && typeof r.then === 'function') {
-                      r.then(function(x){
-                        if (x && typeof x === 'object') fin('promise', x.errno, x.stdout, x.stderr);
-                        else if (typeof x === 'string') fin('promise-str', 0, x, '');
-                        else fin('promise-empty', 0, '', '');
-                      }).catch(function(e){ fin('promise-catch', -3, '', String(e)); });
-                    } else if (typeof r === 'string') {
-                      fin('direct-str', 0, r, '');
-                    } else {
-                      fin('direct-unknown', 0, '', '');
-                    }
-                  } else {
-                    var r2 = KS.exec(cmd, function(errno, stdout, stderr){
-                      fin('callback', errno, stdout, stderr);
-                    });
-                    if (r2 && typeof r2.then === 'function') {
-                      r2.then(function(x){
-                        if (done) return;
-                        if (x && typeof x === 'object') fin('callback-promise', x.errno, x.stdout, x.stderr);
-                      }).catch(function(){});
-                    }
-                  }
-                } catch(e) {
-                  try {
-                    var r3 = KS.exec(cmd, {}, function(errno, stdout, stderr){
-                      fin('callback3', errno, stdout, stderr);
-                    });
-                    if (r3 && r3.then) r3.then(function(x){ if(done)return; if(x&&typeof x==='object') fin('callback3-promise', x.errno, x.stdout, x.stderr); });
-                  } catch(e2) {
-                    fin('threw', -4, '', String(e) + ' / ' + String(e2));
-                  }
-                }
-              });
+            function execB64(cmd){
+              if (!KS || typeof KS.exec !== 'function') { _rec(cmd, 'noksu', 0, 0); return ''; }
+              var full = cmd + " 2>&1 | base64 -w 0";
+              var r;
+              try { r = KS.exec(full); }
+              catch(e) { _rec(cmd, 'throw', 0, 0); return ''; }
+              if (r == null) { _rec(cmd, 'null', 0, 0); return ''; }
+              if (typeof r === 'string') {
+                _rec(cmd, 'str-b64', r.length, 0);
+                return b64decode(r);
+              }
+              if (typeof r === 'object' && typeof r.then === 'function') {
+                _rec(cmd, 'promise-ignored', 0, 0);
+                return '';
+              }
+              if (typeof r === 'object' && r.stdout != null) {
+                _rec(cmd, 'obj-b64', String(r.stdout).length, String(r.stderr||'').length);
+                return b64decode(r.stdout);
+              }
+              _rec(cmd, 'unknown', 0, 0);
+              return '';
             }
 
             function shq(s){ return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
 
             function ctl(args){
               var cmd = 'sh ' + CTL + ' ' + args;
-              return kx(cmd, 15000).then(function(r){
-                if (r.errno === 0 && r.stdout) return r;
-                return kx('su -c ' + shq(cmd), 15000);
-              });
+              var out = execB64(cmd);
+              if (!out) out = execB64('su -c ' + shq(cmd));
+              return out || '';
             }
 
             function listPackages(){
-              return kx('pm list packages -3', 12000).then(function(r){
-                if (r.stdout) return r;
-                return kx('su -c ' + shq('pm list packages -3'), 12000);
-              }).then(function(r){
-                if (r.stdout) return r;
-                return kx('su -c ' + shq('cmd package list packages'), 12000);
-              });
+              var out = execB64('pm list packages -3');
+              if (!out) out = execB64('su -c ' + shq('pm list packages -3'));
+              if (!out) out = execB64('su -c ' + shq('cmd package list packages'));
+              return out || '';
             }
 
             var PR = window.APPSPOOF_PRESETS||{}, GP = window.APPSPOOF_GPU||{}, CP = window.APPSPOOF_CPU||{};
@@ -1297,62 +1270,57 @@ jobs:
             }
 
             function loadApps(){
-              if (st.apps) return Promise.resolve(st.apps);
-              return listPackages().then(function(r){
-                st.apps = parseApps(r.stdout);
-                return st.apps;
-              });
+              if (st.apps) return st.apps;
+              st.apps = parseApps(listPackages());
+              return st.apps;
             }
 
             function stat(){
-              return ctl('status').then(function(r){
-                var kv = {};
-                (r.stdout||'').split(/\r?\n/).forEach(function(l){
-                  var m = l.match(/^([a-z\-_]+)=(.*)$/); if (m) kv[m[1]] = m[2];
-                });
-                st.device.enabled = kv.device_enabled === '1';
-                st.hw.enabled = kv.hw_enabled === '1';
-                if($('device-enabled')) $('device-enabled').checked = st.device.enabled;
-                if($('hw-enabled')) $('hw-enabled').checked = st.hw.enabled;
-                var ksel = $('stat-ks');
-                if (ksel){
-                  var k = kv['kill-switch'] || '';
-                  ksel.textContent = k.indexOf('AKTIF')>=0 ? 'ks ON' : 'ks off';
-                  ksel.className = 'pill ' + (k.indexOf('AKTIF')>=0 ? 'danger' : 'ok');
-                }
-                var de = $('stat-device');
-                if (de){ de.textContent = 'device ' + (kv.device_rules||'0'); de.className = 'pill ' + (st.device.enabled?'ok':''); }
-                var he = $('stat-hw');
-                if (he){ he.textContent = 'hw ' + (kv.hw_rules||'0'); he.className = 'pill ' + (st.hw.enabled?'ok':''); }
+              var out = ctl('status');
+              var kv = {};
+              (out||'').split(/\r?\n/).forEach(function(l){
+                var m = l.match(/^([a-z\-_]+)=(.*)$/); if (m) kv[m[1]] = m[2];
               });
+              st.device.enabled = kv.device_enabled === '1';
+              st.hw.enabled = kv.hw_enabled === '1';
+              if($('device-enabled')) $('device-enabled').checked = st.device.enabled;
+              if($('hw-enabled')) $('hw-enabled').checked = st.hw.enabled;
+              var ksel = $('stat-ks');
+              if (ksel){
+                var k = kv['kill-switch'] || '';
+                ksel.textContent = k.indexOf('AKTIF')>=0 ? 'ks ON' : 'ks off';
+                ksel.className = 'pill ' + (k.indexOf('AKTIF')>=0 ? 'danger' : 'ok');
+              }
+              var de = $('stat-device');
+              if (de){ de.textContent = 'device ' + (kv.device_rules||'0'); de.className = 'pill ' + (st.device.enabled?'ok':''); }
+              var he = $('stat-hw');
+              if (he){ he.textContent = 'hw ' + (kv.hw_rules||'0'); he.className = 'pill ' + (st.hw.enabled?'ok':''); }
             }
 
             function loadD(){
-              return ctl('device list').then(function(r){
-                var o=[];
-                (r.stdout||'').split(/\r?\n/).forEach(function(l){
-                  if(!l || l.charAt(0)==='#') return;
-                  var p=l.split('\t');
-                  if(p.length>=2 && p[0]) o.push({pkg:p[0], code:p[1]||''});
-                });
-                st.device.rules = o;
-                renderD();
-                if($('device-count')) $('device-count').textContent = o.length + ' apps Spoofed';
+              var out = ctl('device list');
+              var o=[];
+              (out||'').split(/\r?\n/).forEach(function(l){
+                if(!l || l.charAt(0)==='#') return;
+                var p=l.split('\t');
+                if(p.length>=2 && p[0]) o.push({pkg:p[0], code:p[1]||''});
               });
+              st.device.rules = o;
+              renderD();
+              if($('device-count')) $('device-count').textContent = o.length + ' apps Spoofed';
             }
 
             function loadH(){
-              return ctl('hw list').then(function(r){
-                var o=[];
-                (r.stdout||'').split(/\r?\n/).forEach(function(l){
-                  if(!l || l.charAt(0)==='#') return;
-                  var p=l.split('\t');
-                  if(p.length>=1 && p[0]) o.push({pkg:p[0], gpu:p[1]||'', cpu:p[2]||''});
-                });
-                st.hw.rules = o;
-                renderH();
-                if($('hw-count')) $('hw-count').textContent = o.length + ' configured';
+              var out = ctl('hw list');
+              var o=[];
+              (out||'').split(/\r?\n/).forEach(function(l){
+                if(!l || l.charAt(0)==='#') return;
+                var p=l.split('\t');
+                if(p.length>=1 && p[0]) o.push({pkg:p[0], gpu:p[1]||'', cpu:p[2]||''});
               });
+              st.hw.rules = o;
+              renderH();
+              if($('hw-count')) $('hw-count').textContent = o.length + ' configured';
             }
 
             function lbl(c){ return (PR[c] && PR[c].label) || c || '?'; }
@@ -1428,26 +1396,24 @@ jobs:
 
             function onSD(){
               var q=($('device-pkg').value||'').trim().toLowerCase();
-              loadApps().then(function(a){
-                pick($('device-applist'), a, q, function(p){ $('device-pkg').value=p; });
-                if(!a.length) toast('Tidak ada app ('+a.length+'). Cek log.', true);
-              });
+              var a = loadApps();
+              pick($('device-applist'), a, q, function(p){ $('device-pkg').value=p; });
+              if(!a.length) toast('Tidak ada app ('+a.length+'). Cek log.', true);
             }
             function onSH(){
               var q=($('hw-pkg').value||'').trim().toLowerCase();
-              loadApps().then(function(a){
-                pick($('hw-applist'), a, q, function(p){ $('hw-pkg').value=p; });
-              });
+              var a = loadApps();
+              pick($('hw-applist'), a, q, function(p){ $('hw-pkg').value=p; });
             }
 
             function onDA(){
               var p=($('device-pkg').value||'').trim();
               var c=$('device-code').value;
               if(!p||!c){ toast('Isi pkg & preset', true); return; }
-              ctl('device set '+p+' '+c).then(function(r){
-                toast(r.errno===0 ? ('OK: '+p+' -> '+lbl(c)) : ('Gagal: '+(r.stderr||r.stdout||'').slice(0,100)), r.errno!==0);
-                return loadD().then(stat);
-              });
+              ctl('device set '+p+' '+c);
+              loadD();
+              stat();
+              toast('Set ' + p + ' -> ' + lbl(c));
             }
             function onHA(){
               var p=($('hw-pkg').value||'').trim();
@@ -1455,16 +1421,16 @@ jobs:
               var c=$('hw-cpu').value;
               if(!p){ toast('Isi pkg', true); return; }
               if(!g&&!c){ toast('Pilih GPU/CPU', true); return; }
-              ctl("hw set "+p+" '"+g+"' '"+c+"'").then(function(r){
-                toast(r.errno===0 ? ('OK: '+p) : ('Gagal: '+(r.stderr||r.stdout||'').slice(0,100)), r.errno!==0);
-                return loadH().then(stat);
-              });
+              ctl("hw set "+p+" '"+g+"' '"+c+"'");
+              loadH();
+              stat();
+              toast('Set ' + p);
             }
 
-            function onDC(){ if(!confirm('Clear device?'))return; ctl('device clear').then(function(){return loadD().then(stat)}); }
-            function onHC(){ if(!confirm('Clear HW?'))return; ctl('hw clear').then(function(){return loadH().then(stat)}); }
-            function onDT(v){ ctl(v?'device enable':'device disable').then(stat); }
-            function onHT(v){ ctl(v?'hw enable':'hw disable').then(stat); }
+            function onDC(){ if(!confirm('Clear device?'))return; ctl('device clear'); loadD(); stat(); }
+            function onHC(){ if(!confirm('Clear HW?'))return; ctl('hw clear'); loadH(); stat(); }
+            function onDT(v){ ctl(v?'device enable':'device disable'); stat(); }
+            function onHT(v){ ctl(v?'hw enable':'hw disable'); stat(); }
 
             function showDebug(){
               var body = $('log-body'); if(!body) return;
@@ -1475,27 +1441,21 @@ jobs:
               lines.push('KS.exec.length: ' + (KS && KS.exec ? KS.exec.length : 'n/a'));
               lines.push('typeof KS.exec: ' + (KS && KS.exec ? typeof KS.exec : 'n/a'));
               lines.push('');
-              lines.push('=== coba ctl status ===');
-              ctl('status').then(function(r){
-                lines.push('errno=' + r.errno + ' tag=' + r.tag);
-                lines.push('stdout=' + JSON.stringify(r.stdout));
-                lines.push('stderr=' + JSON.stringify(r.stderr));
-                lines.push('');
-                lines.push('=== coba pm list packages ===');
-                return listPackages();
-              }).then(function(r){
-                lines.push('errno=' + r.errno + ' tag=' + r.tag);
-                lines.push('stdout=' + JSON.stringify((r.stdout||'').slice(0,300)));
-                lines.push('stderr=' + JSON.stringify(r.stderr));
-                body.textContent = lines.join('\n');
-              }).catch(function(e){
-                lines.push('panic: ' + e);
-                body.textContent = lines.join('\n');
-              });
+              lines.push('=== raw: ctl status (decoded) ===');
+              var out1 = ctl('status');
+              lines.push(JSON.stringify(out1));
+              lines.push('');
+              lines.push('=== raw: pm list packages -3 (decoded, first 300 char) ===');
+              var out2 = listPackages();
+              lines.push(JSON.stringify((out2||'').slice(0,300)));
+              lines.push('');
+              lines.push('=== jumlah app: ' + parseApps(out2).length + ' ===');
+              body.textContent = lines.join('\n');
             }
 
             function onApply(){
-              loadD().then(loadH).then(stat).then(function(){ toast('Apply OK'); });
+              loadD(); loadH(); stat();
+              toast('Apply OK');
             }
 
             function tabs(){
@@ -1534,14 +1494,14 @@ jobs:
                   window.scrollTo({top:0, behavior:'smooth'});
                 } else if(a==='dd'){
                   if(!confirm('Hapus '+p+'?')) return;
-                  ctl('device remove '+p).then(function(){ return loadD().then(stat); });
+                  ctl('device remove '+p); loadD(); stat();
                 } else if(a==='eh'){
                   var r2=st.hw.rules.filter(function(x){return x.pkg===p})[0];
                   if(r2){ $('hw-pkg').value=r2.pkg; $('hw-gpu').value=r2.gpu||''; $('hw-cpu').value=r2.cpu||''; }
                   window.scrollTo({top:0, behavior:'smooth'});
                 } else if(a==='dh'){
                   if(!confirm('Hapus '+p+'?')) return;
-                  ctl('hw remove '+p).then(function(){ return loadH().then(stat); });
+                  ctl('hw remove '+p); loadH(); stat();
                 }
               });
             }
@@ -1549,7 +1509,7 @@ jobs:
             function boot(){
               tabs(); bind(); fill();
               if(!KS) toast('ksu tidak terdeteksi', true);
-              loadD().then(loadH).then(stat).catch(function(e){ toast('Init: '+String(e).slice(0,80), true); });
+              loadD(); loadH(); stat();
             }
 
             if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
