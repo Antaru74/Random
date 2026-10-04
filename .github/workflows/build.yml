@@ -430,6 +430,7 @@ jobs:
           X_EOF
 
           cat > src/companion.cpp <<'X_EOF'
+          #include <sys/types.h>
           #include <zygisk.hpp>
           #include <unistd.h>
           #include <fcntl.h>
@@ -947,6 +948,8 @@ jobs:
           INC_SH="-I$SH -I$SH/include -I$SH/arch/arm64 -I$SH/common -I$SH/third_party/xdl -I$SH/third_party/bsd -I$SH/third_party/lss"
           INC_MOD="-Isrc -Isrc/third_party -I$SH/include"
 
+          EXTRA="-include sys/types.h"
+
           mkdir -p build/sh build/mod
 
           echo "== [1/4] shadowhook .c =="
@@ -958,7 +961,7 @@ jobs:
               arm64|common|third_party) o="build/sh/${dir}__${name}.o" ;;
               *) o="build/sh/${name}.o" ;;
             esac
-            "$CC" -std=c11 -O2 -fPIC -fvisibility=hidden -Wno-everything $INC_SH -c "$c" -o "$o"
+            "$CC" -std=c11 -O2 -fPIC -fvisibility=hidden -Wno-everything $EXTRA $INC_SH -c "$c" -o "$o"
             sh_n=$((sh_n+1))
           done
           echo "compiled shadowhook .c: $sh_n"
@@ -974,10 +977,10 @@ jobs:
 
           echo "== [3/4] module =="
           for f in device_rules hw_rules; do
-            "$CC" -std=c11 -O2 -fPIC -fvisibility=hidden -Wno-everything $INC_MOD -c "src/$f.c" -o "build/mod/$f.o"
+            "$CC" -std=c11 -O2 -fPIC -fvisibility=hidden -Wno-everything $EXTRA $INC_MOD -c "src/$f.c" -o "build/mod/$f.o"
           done
           for f in build_spoof hw_hooks zygisk_module companion; do
-            "$CXX" -std=c++17 -O2 -fPIC -fvisibility=hidden -fno-exceptions -fno-rtti -Wno-everything $INC_MOD -c "src/$f.cpp" -o "build/mod/$f.o"
+            "$CXX" -std=c++17 -O2 -fPIC -fvisibility=hidden -fno-exceptions -fno-rtti -Wno-everything $EXTRA $INC_MOD -c "src/$f.cpp" -o "build/mod/$f.o"
           done
 
           echo "== [4/4] link =="
