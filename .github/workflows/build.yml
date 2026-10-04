@@ -1,11 +1,6 @@
 name: Build AppSpoof
 on:
   workflow_dispatch:
-    inputs:
-      zygisk_api:
-        description: 'Zygisk API version (4 atau 5)'
-        required: false
-        default: '5'
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -14,11 +9,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Android NDK
+      - name: Setup Android NDK r26d
         uses: nttld/setup-ndk@v1
         id: ndk
         with:
-          ndk-version: r27
+          ndk-version: r26d
           add-to-path: true
 
       - name: Install tools
@@ -42,10 +37,12 @@ jobs:
           curl -fsSL -o docs/ref/AdvancedAppSpoofUtils.java "$BASE/AdvancedAppSpoofUtils.java"
           SET="https://raw.githubusercontent.com/Project-PenguinOS/packages_apps_Settings/41697be08ff1bf2760f6a7ec318db61e9adbe9bb"
           curl -fsSL -o docs/ref/custom_arrays.xml "$SET/res/values/custom_arrays.xml"
-          curl -fsSL -o docs/ref/HW_SPOOF.kt \
-            "https://raw.githubusercontent.com/Project-PenguinOS/packages_apps_Settings/5fe1711e707754b57dd66b69d987864b10c4ac6d/src/com/android/settings/system/spoofing/AdvancedAppSpoofSettings.kt"
 
           echo "deps OK"
+
+          # Turunkan ZYGISK_API_VERSION ke 4
+          sed -i 's|^#define ZYGISK_API_VERSION 5$|#define ZYGISK_API_VERSION 4|' src/third_party/zygisk.hpp
+          grep -n 'ZYGISK_API_VERSION' src/third_party/zygisk.hpp | head -n 3
 
       - name: Write source files (C + headers)
         run: |
@@ -238,7 +235,6 @@ jobs:
           X_EOF
 
           echo "C sources OK"
-          ls -la src/
 
       - name: Write source files (C++)
         run: |
@@ -344,8 +340,6 @@ jobs:
                       (void)setenv("SPOOF_VULKAN_VENDOR_ID", g->vk_vendor, 1);
                       LOGI("[HW] GPU env key=%s renderer=%s", gpu_key, g->renderer);
                       applied++;
-                  } else {
-                      LOGW("[HW] GPU key tidak dikenal: %s", gpu_key);
                   }
               }
               if (cpu_key[0]) {
@@ -359,11 +353,7 @@ jobs:
                           if (set_static_string(env, cls, "SOC_MANUFACTURER", c->soc_mfr)   == 1) applied++;
                           env->DeleteLocalRef(cls);
                           LOGI("[HW] CPU key=%s model=%s mfr=%s", cpu_key, c->soc_model, c->soc_mfr);
-                      } else {
-                          if (env->ExceptionCheck()) env->ExceptionClear();
                       }
-                  } else {
-                      LOGW("[HW] CPU key tidak dikenal: %s", cpu_key);
                   }
               }
               return applied;
@@ -432,8 +422,6 @@ jobs:
                       int rc = appspoof_hw_apply(env, g_hw_gpu, g_hw_cpu);
                       if (rc >= 0) L(ANDROID_LOG_INFO, "POST-HW", "gpu=%s cpu=%s fields=%d SUCCESS",
                                      g_hw_gpu, g_hw_cpu, rc);
-                      else         L(ANDROID_LOG_ERROR, "POST-HW", "gpu=%s cpu=%s rc=%d FAIL",
-                                     g_hw_gpu, g_hw_cpu, rc);
                   }
               }
           private:
@@ -446,7 +434,6 @@ jobs:
           X_EOF
 
           echo "C++ sources OK"
-          ls -la src/
 
       - name: Write Python extractors
         run: |
@@ -521,98 +508,8 @@ jobs:
                          p.get("DEVICE",""), p.get("MODEL",""),
                          p.get("FINGERPRINT",""), p.get("PRODUCT",""),
                          "docs/ref/PerAppsPropsUtils.java"]
-                  for v in row:
-                      if "\t" in v or "\n" in v: raise SystemExit(f"tab in {code}")
                   f.write("\t".join(row) + "\n")
           print(f"presets.tsv: {len(order)} entries")
-          X_EOF
-
-          cat > tools_extract_hw.py <<'X_EOF'
-          #!/usr/bin/env python3
-          import re, pathlib
-
-          JAVA = pathlib.Path("docs/ref/AdvancedAppSpoofUtils.java")
-          GPU_OUT = pathlib.Path("src/hw_gpu.tsv")
-          CPU_OUT = pathlib.Path("src/hw_cpu.tsv")
-          TPL = pathlib.Path("src/hw_templates"); TPL.mkdir(parents=True, exist_ok=True)
-
-          def unescape(s):
-              out, i = [], 0
-              while i < len(s):
-                  if s[i] == '\\' and i + 1 < len(s):
-                      n = s[i+1]
-                      if n == 'n': out.append('\n'); i += 2; continue
-                      if n == 't': out.append('\t'); i += 2; continue
-                      if n == 'r': out.append('\r'); i += 2; continue
-                      if n == '"': out.append('"');  i += 2; continue
-                      if n == '\\': out.append('\\'); i += 2; continue
-                  out.append(s[i]); i += 1
-              return ''.join(out)
-
-          def read_str(text, start):
-              i = start
-              while i < len(text) and text[i] != '"': i += 1
-              if i >= len(text): return ('', start)
-              i += 1
-              buf = []
-              while i < len(text):
-                  c = text[i]
-                  if c == '\\':
-                      if i + 1 < len(text): buf.append(text[i:i+2]); i += 2; continue
-                      i += 1; continue
-                  if c == '"':
-                      res = unescape(''.join(buf)); buf = []
-                      i += 1
-                      j = i
-                      while j < len(text) and text[j] in ' \t\r\n': j += 1
-                      if j < len(text) and text[j] == '+':
-                          j += 1
-                          while j < len(text) and text[j] in ' \t\r\n': j += 1
-                          if j < len(text) and text[j] == '"':
-                              i = j + 1; continue
-                      return (res, i)
-                  buf.append(c); i += 1
-              return ('', i)
-
-          text = JAVA.read_text(encoding="utf-8")
-
-          def read_fields(start, nfields):
-              i = start; fields = []
-              while i < len(text) and len(fields) < nfields:
-                  while i < len(text) and text[i] in ' \t\r\n,': i += 1
-                  if i >= len(text): break
-                  if text[i] == '}': break
-                  if text[i] == '"':
-                      s, i = read_str(text, i); fields.append(s)
-                  else: break
-              return fields
-
-          gpu = []
-          for m in re.finditer(r'GPU_PRESETS\.put\(\s*"([^"]+)"\s*,\s*new\s+String\[\]\s*\{', text):
-              k = m.group(1); f = read_fields(m.end(), 4)
-              if len(f) == 4: gpu.append([k] + f)
-
-          cpu = []
-          for m in re.finditer(r'CPU_PRESETS\.put\(\s*"([^"]+)"\s*,\s*new\s+String\[\]\s*\{', text):
-              k = m.group(1); f = read_fields(m.end(), 5)
-              if len(f) == 5: cpu.append([k] + f)
-
-          with GPU_OUT.open("w", encoding="utf-8") as f:
-              f.write("key\trenderer\tvendor\tvk_device\tvk_vendor\tsource\n")
-              for k, r, v, vkd, vkv in gpu:
-                  f.write("\t".join([k, r, v, vkd, vkv, "docs/ref/AdvancedAppSpoofUtils.java"]) + "\n")
-
-          with CPU_OUT.open("w", encoding="utf-8") as f:
-              f.write("key\thardware\tsoc_model\tsoc_mfr\tboard\ttemplate_file\tsource\n")
-              for row in cpu:
-                  k, hw, soc, mfr, board, tpl = row
-                  tpl_path = TPL / (k + ".cpuinfo")
-                  tpl_path.write_text(tpl, encoding="utf-8")
-                  f.write("\t".join([k, hw, soc, mfr, board,
-                                     f"src/hw_templates/{k}.cpuinfo",
-                                     "docs/ref/AdvancedAppSpoofUtils.java"]) + "\n")
-
-          print(f"hw_gpu.tsv={len(gpu)}  hw_cpu.tsv={len(cpu)}")
           X_EOF
 
           cat > tools_gen_headers.py <<'X_EOF'
@@ -626,15 +523,12 @@ jobs:
               for ln in p.read_text(encoding="utf-8").splitlines():
                   if not ln or ln.startswith("#"): continue
                   parts = ln.split("\t")
-                  if parts[0] == "key": continue
+                  if parts[0] == "code": continue
                   if len(parts) != ncol: continue
                   rows.append(parts)
               return rows
 
           prows = read_tsv(pathlib.Path("src/presets.tsv"), 9)
-          hrows = read_tsv(pathlib.Path("src/hw_models.tsv"), 4)
-          grows = read_tsv(pathlib.Path("src/hw_gpu.tsv"), 6)
-          crows = read_tsv(pathlib.Path("src/hw_cpu.tsv"), 7)
 
           with open("src/presets_gen.h", "w") as f:
               f.write("#pragma once\nstruct appspoof_preset { const char *code,*label,*brand,*manufacturer,*device,*model,*fingerprint,*product; };\n")
@@ -645,88 +539,21 @@ jobs:
               f.write("};\n")
               f.write(f"static const int appspoof_presets_count = {len(prows)};\n")
 
-          with open("src/hw_models_gen.h", "w") as f:
-              f.write("#pragma once\nstruct appspoof_hw_model { const char *key; const char *label; };\n")
-              g = [r for r in hrows if r[0]=="gpu"]; c = [r for r in hrows if r[0]=="cpu"]
-              f.write(f"static const struct appspoof_hw_model appspoof_gpu_models[{max(len(g),1)}] = {{\n")
-              for r in g: f.write(f'  {{ "{esc(r[1])}", "{esc(r[2])}" }},\n')
-              if not g: f.write('  { "","" },\n')
-              f.write("};\n")
-              f.write(f"static const int appspoof_gpu_models_count = {len(g)};\n")
-              f.write(f"static const struct appspoof_hw_model appspoof_cpu_models[{max(len(c),1)}] = {{\n")
-              for r in c: f.write(f'  {{ "{esc(r[1])}", "{esc(r[2])}" }},\n')
-              if not c: f.write('  { "","" },\n')
-              f.write("};\n")
-              f.write(f"static const int appspoof_cpu_models_count = {len(c)};\n")
-
           with open("src/hw_values_gen.h", "w") as f:
               f.write("#pragma once\nstruct appspoof_gpu_value { const char *key,*renderer,*vendor,*vk_device,*vk_vendor; };\n")
-              f.write(f"static const struct appspoof_gpu_value appspoof_gpu_values[{max(len(grows),1)}] = {{\n")
-              for r in grows: f.write('  { ' + ','.join(f'"{esc(x)}"' for x in r[:5]) + ' },\n')
-              if not grows: f.write('  { "","","","","" },\n')
-              f.write("};\n")
-              f.write(f"static const int appspoof_gpu_values_count = {len(grows)};\n")
+              f.write("static const struct appspoof_gpu_value appspoof_gpu_values[1] = {{ \"\",\"\",\"\",\"\",\"\" }};\n")
+              f.write("static const int appspoof_gpu_values_count = 0;\n")
               f.write("struct appspoof_cpu_value { const char *key,*hardware,*soc_model,*soc_mfr,*board; };\n")
-              f.write(f"static const struct appspoof_cpu_value appspoof_cpu_values[{max(len(crows),1)}] = {{\n")
-              for r in crows: f.write('  { ' + ','.join(f'"{esc(x)}"' for x in r[:5]) + ' },\n')
-              if not crows: f.write('  { "","","","","" },\n')
-              f.write("};\n")
-              f.write(f"static const int appspoof_cpu_values_count = {len(crows)};\n")
+              f.write("static const struct appspoof_cpu_value appspoof_cpu_values[1] = {{ \"\",\"\",\"\",\"\",\"\" }};\n")
+              f.write("static const int appspoof_cpu_values_count = 0;\n")
 
-          print(f"presets={len(prows)} hw_models={len(hrows)} hw_gpu={len(grows)} hw_cpu={len(crows)}")
-          X_EOF
-
-          cat > tools_gen_webroot.py <<'X_EOF'
-          #!/usr/bin/env python3
-          import pathlib, json
-          prows = []
-          for ln in pathlib.Path("src/presets.tsv").read_text(encoding="utf-8").splitlines()[1:]:
-              if not ln: continue
-              c, label, brand, mfg, device, model, fp, prod, _ = ln.split("\t")
-              prows.append((c, {"label": label, "brand": brand, "manufacturer": mfg,
-                                "device": device, "model": model,
-                                "fingerprint": fp, "product": prod}))
-          grows = {}; crows = {}
-          for ln in pathlib.Path("src/hw_gpu.tsv").read_text(encoding="utf-8").splitlines()[1:]:
-              if not ln: continue
-              k, rnd, *_ = ln.split("\t"); grows[k] = rnd
-          for ln in pathlib.Path("src/hw_cpu.tsv").read_text(encoding="utf-8").splitlines()[1:]:
-              if not ln: continue
-              k, hw, soc, mfr, *_ = ln.split("\t"); crows[k] = f"{soc} ({mfr})"
-          out = [
-              "// AUTO-GENERATED",
-              "window.APPSPOOF_PRESETS = " + json.dumps(dict(prows), ensure_ascii=False, indent=2) + ";",
-              "window.APPSPOOF_GPU = " + json.dumps(grows, ensure_ascii=False, indent=2) + ";",
-              "window.APPSPOOF_CPU = " + json.dumps(crows, ensure_ascii=False, indent=2) + ";",
-              "",
-          ]
-          pathlib.Path("module/webroot/presets.js").write_text("\n".join(out), encoding="utf-8")
-          print("presets.js OK")
+          print(f"presets={len(prows)}")
           X_EOF
 
           python3 tools_extract_presets.py
-          python3 tools_extract_hw.py
-
-          python3 - <<'PY'
-          import pathlib
-          out = pathlib.Path("src/hw_models.tsv")
-          lines = ["kind\tkey\tlabel\tsource"]
-          for ln in pathlib.Path("src/hw_gpu.tsv").read_text(encoding="utf-8").splitlines()[1:]:
-              if not ln: continue
-              k, rnd, *_ = ln.split("\t")
-              lines.append(f"gpu\t{k}\t{rnd}\tsrc/hw_gpu.tsv")
-          for ln in pathlib.Path("src/hw_cpu.tsv").read_text(encoding="utf-8").splitlines()[1:]:
-              if not ln: continue
-              k, hw, soc, mfr, board, tpl, _src = ln.split("\t")
-              lines.append(f"cpu\t{k}\t{soc} ({mfr})\tsrc/hw_cpu.tsv")
-          out.write_text("\n".join(lines) + "\n", encoding="utf-8")
-          print(f"hw_models.tsv: {len(lines)-1}")
-          PY
-
           python3 tools_gen_headers.py
-          python3 tools_gen_webroot.py
 
-      - name: Compile with Android NDK
+      - name: Compile with Android NDK r26d
         run: |
           set -e
           NDK="${ANDROID_NDK_HOME}"
@@ -734,9 +561,7 @@ jobs:
           SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           CC="$TCBIN/aarch64-linux-android24-clang"
           CXX="$TCBIN/aarch64-linux-android24-clang++"
-          STRIP="$TCBIN/llvm-strip"
-          [ -x "$CC" ]  || { echo "FAIL: $CC tidak ada"; exit 1; }
-          [ -x "$CXX" ] || { echo "FAIL: $CXX tidak ada"; exit 1; }
+          [ -x "$CC" ] && [ -x "$CXX" ] || { echo "FAIL clang"; exit 1; }
 
           INC_MOD="-Isrc -Isrc/third_party"
           EXTRA="-include sys/types.h"
@@ -755,39 +580,31 @@ jobs:
               -Wno-everything $EXTRA $INC_MOD -c "src/$f.cpp" -o "build/mod/$f.o"
           done
 
-          echo "== link (dengan nopack-relative-relocs untuk ZN builtin linker) =="
+          echo "== link =="
           "$CXX" -shared \
             -Wl,--gc-sections -Wl,--exclude-libs,ALL \
             -Wl,--no-as-needed \
             -Wl,-z,nopack-relative-relocs \
+            -Wl,--hash-style=both \
             -o build/libzygisk.so build/mod/*.o
 
-          echo "--- pre-strip readelf ---"
-          readelf -d build/libzygisk.so | grep -E 'NEEDED|RPATH|RUNPATH|RELR|RELRSZ' || true
+          echo "--- readelf -d ---"
+          readelf -d build/libzygisk.so | grep -E 'NEEDED|RPATH|RUNPATH|RELR' || true
 
-          echo "== sanity: entry point ada =="
+          echo "== sanity check =="
           nm -D build/libzygisk.so | grep -E 'zygisk_module_entry' || { echo "FAIL: entry hilang"; exit 1; }
 
-          echo "== sanity: cek ada DT_RELR (harus kosong) =="
-          if readelf -d build/libzygisk.so | grep -q 'RELR'; then
-            echo "WARN: DT_RELR masih ada"
-          else
-            echo "OK: tidak ada DT_RELR"
-          fi
+          echo "== strip debug saja (pertahankan .symtab) =="
+          "$CXX" -dumpversion >/dev/null 2>&1 || true
+          "$TCBIN/llvm-strip" --strip-debug build/libzygisk.so || strip --strip-debug build/libzygisk.so || true
+          ls -la build/libzygisk.so
 
-          echo "== strip =="
-          cp build/libzygisk.so build/libzygisk.so.bak
-          "$STRIP" --strip-all build/libzygisk.so
-          ls -la build/libzygisk.so.bak build/libzygisk.so
-
-          echo "--- post-strip readelf ---"
-          readelf -d build/libzygisk.so | grep -E 'NEEDED|RPATH|RUNPATH' || true
-
-          echo "== copy libc++_shared.so dari NDK =="
+          echo "== copy libc++_shared =="
           cp "$SYSROOT/usr/lib/aarch64-linux-android/libc++_shared.so" build/libc++_shared.so
-          "$STRIP" --strip-all build/libc++_shared.so
           ls -la build/libc++_shared.so
-          readelf -d build/libc++_shared.so | grep -E 'NEEDED|RPATH|RUNPATH' || true
+
+          echo "== dump ZYGISK_API_VERSION =="
+          grep -n 'ZYGISK_API_VERSION' src/third_party/zygisk.hpp | head -n 3
 
       - name: Write module files
         run: |
@@ -795,19 +612,19 @@ jobs:
           cat > module/module.prop <<'X_EOF'
           id=appspoof_zygisk
           name=AppSpoof
-          version=v1.0.0-trial2
+          version=v1.0.0-api4
           versionCode=1
           author=APPSPOOF
-          description=Minimal Zygisk module — libc++_shared bundled, nopack-relative-relocs.
+          description=Zygisk API v4 test — untuk kompatibilitas Zygisk Next 1.4.5.
           X_EOF
 
           cat > module/customize.sh <<'X_EOF'
           #!/system/bin/sh
           SKIPUNZIP=0
-          ui_print "- APPSPOOF trial2: customize"
+          ui_print "- APPSPOOF api4: customize"
           set_perm_recursive "$MODPATH" 0 0 0755 0644
           [ -d "$MODPATH/zygisk" ] && set_perm_recursive "$MODPATH/zygisk" 0 0 0755 0644
-          ui_print "- APPSPOOF trial2: done"
+          ui_print "- APPSPOOF api4: done"
           X_EOF
 
           cat > module/uninstall.sh <<'X_EOF'
@@ -818,7 +635,7 @@ jobs:
 
           chmod +x module/customize.sh module/uninstall.sh
 
-      - name: Package module zip
+      - name: Package
         run: |
           set -e
           STAGE=build/stage
@@ -826,20 +643,15 @@ jobs:
           cp module/module.prop  "$STAGE/"
           cp module/customize.sh "$STAGE/"
           cp module/uninstall.sh "$STAGE/"
-          cp build/libzygisk.so        "$STAGE/zygisk/arm64-v8a.so"
-          cp build/libc++_shared.so    "$STAGE/zygisk/libc++_shared.so"
+          cp build/libzygisk.so     "$STAGE/zygisk/arm64-v8a.so"
+          cp build/libc++_shared.so "$STAGE/zygisk/libc++_shared.so"
           chmod 0755 "$STAGE/customize.sh" "$STAGE/uninstall.sh"
-          chmod 0644 "$STAGE/zygisk/arm64-v8a.so"
-          chmod 0644 "$STAGE/zygisk/libc++_shared.so"
-          echo "=== struktur ==="
-          find "$STAGE" -type f | sort
-          echo ""
+          chmod 0644 "$STAGE/zygisk/arm64-v8a.so" "$STAGE/zygisk/libc++_shared.so"
           echo "=== .so info ==="
-          readelf -d "$STAGE/zygisk/arm64-v8a.so" | grep -E 'NEEDED|RPATH|RUNPATH' || true
+          readelf -d "$STAGE/zygisk/arm64-v8a.so" | grep -E 'NEEDED|RPATH|RUNPATH|RELR' || true
           nm -D "$STAGE/zygisk/arm64-v8a.so" | grep -E 'zygisk_module_entry'
-          echo ""
           STAMP=$(date -u +%Y%m%d-%H%M%S)
-          ZIP="appspoof-trial2-$STAMP.zip"
+          ZIP="appspoof-api4-$STAMP.zip"
           ( cd "$STAGE" && zip -r -q "../../$ZIP" . -x '.*' )
           ls -la "$ZIP"
           sha256sum "$ZIP"
@@ -848,6 +660,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: appspoof-trial2
-          path: appspoof-trial2-*.zip
+          name: appspoof-api4
+          path: appspoof-api4-*.zip
           if-no-files-found: error
