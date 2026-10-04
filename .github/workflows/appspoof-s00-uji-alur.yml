@@ -1,4 +1,4 @@
-# APPSPOOF S00 r1 — Uji Alur
+# APPSPOOF S00 r2 — Uji Alur
 name: AppSpoof S00 Uji Alur
 
 on:
@@ -12,102 +12,124 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
-      - name: Tulis header log
+      - name: Siapkan direktori hasil
+        if: always()
         run: |
-          set -euo pipefail
-          : > s00.log
-          {
-            echo "== S00 r1 mulai =="
-            date -u +"%Y-%m-%dT%H:%M:%SZ"
-          } 2>&1 | tee -a s00.log
+          mkdir -p /tmp/s00
+          : > /tmp/s00/s00.log
+          : > /tmp/s00/api.txt
+          date -u +"%Y-%m-%dT%H:%M:%SZ" | tee -a /tmp/s00/s00.log
 
       - name: Setup NDK r27
         id: ndk
+        if: always()
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r27
           add-to-path: true
 
       - name: Info runner dan tool
+        if: always()
         run: |
-          set -euo pipefail
           {
             echo "== uname =="
             uname -a
             echo "== os-release =="
-            grep -E '^(NAME|VERSION)=' /etc/os-release || true
+            grep -E '^(NAME|VERSION)=' /etc/os-release 2>&1 || true
             echo "== git =="
-            git --version || true
+            git --version 2>&1 || true
             echo "== python3 =="
-            python3 --version || true
+            python3 --version 2>&1 || true
             echo "== node =="
-            (node --version || echo "node: tidak ada")
+            node --version 2>&1 || echo "node: tidak ada"
             echo "== curl =="
-            (curl --version | head -1 || true)
+            curl --version 2>&1 | head -1 || true
             echo "== gh =="
-            (gh --version | head -1 || true)
-          } 2>&1 | tee -a s00.log
+            gh --version 2>&1 | head -1 || true
+          } 2>&1 | tee -a /tmp/s00/s00.log
 
       - name: Cek NDK r27
+        if: always()
         run: |
-          set -euo pipefail
           {
             echo "== ANDROID_NDK_HOME =="
             echo "${ANDROID_NDK_HOME:-<kosong>}"
             if [ -n "${ANDROID_NDK_HOME:-}" ] && [ -d "${ANDROID_NDK_HOME}" ]; then
-              echo "== source.properties =="
-              grep -E '^(Pkg.Revision|Pkg.Desc)' "${ANDROID_NDK_HOME}/source.properties" || true
+              echo "NDK_DIR_OK: yes"
+              grep -E '^(Pkg.Revision|Pkg.Desc)' "${ANDROID_NDK_HOME}/source.properties" 2>&1 || true
               TC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+              echo "TC=${TC}"
+              ls -d "${TC}" 2>&1 || true
               echo "== clang =="
-              ("$TC/clang" --version | head -3) || true
+              "${TC}/clang" --version 2>&1 | head -3 || true
               echo "== biner audit =="
-              ls "$TC" | grep -E '^(llvm-)?(readelf|nm|objdump)$' || true
+              ls "${TC}" 2>&1 | grep -E '^(llvm-)?(readelf|nm|objdump)$' || true
               echo "== aarch64 clang wrapper =="
-              ls "$TC"/aarch64-linux-android*clang 2>/dev/null | head -5 || true
+              ls "${TC}"/aarch64-linux-android*clang 2>/dev/null | head -5 || true
             else
-              echo "NDK r27 TIDAK ditemukan"
+              echo "NDK_DIR_OK: no"
             fi
-          } 2>&1 | tee -a s00.log
+          } 2>&1 | tee -a /tmp/s00/s00.log
 
       - name: Cek GitHub API dan rate limit
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set +e
+          API=/tmp/s00/api.txt
+          : > "$API"
+
           {
-            echo "== rate_limit =="
-            gh api rate_limit 2>&1 | head -60
-            echo "== repo Antaru74/Random =="
-            gh api repos/Antaru74/Random 2>&1 | grep -E '"full_name"|"default_branch"|"message"' | head -5
-            echo "== repo ronardnx/penguin_frameworks_base =="
-            gh api repos/ronardnx/penguin_frameworks_base 2>&1 | grep -E '"full_name"|"default_branch"|"message"' | head -5
-            echo "== repo Project-PenguinOS/frameworks_base =="
-            gh api repos/Project-PenguinOS/frameworks_base 2>&1 | grep -E '"full_name"|"default_branch"|"message"' | head -5
-            echo "== repo Project-PenguinOS/packages_apps_Settings =="
-            gh api repos/Project-PenguinOS/packages_apps_Settings 2>&1 | grep -E '"full_name"|"default_branch"|"message"' | head -5
-          } 2>&1 | tee -a s00.log
+            echo "== gh auth status =="
+            gh auth status 2>&1 || true
+            echo "== rate_limit (ringkas) =="
+            gh api rate_limit 2>&1 | head -40 || true
+          } 2>&1 | tee -a "$API" | tee -a /tmp/s00/s00.log
+
+          check_repo() {
+            slug="$1"
+            safe=$(printf '%s' "$slug" | tr '/' '_')
+            out="/tmp/s00/gh_${safe}.json"
+            : > "$out"
+            gh api "repos/${slug}" > "$out" 2>&1
+            rc=$?
+            if [ "$rc" -eq 0 ] && grep -q '"full_name"' "$out"; then
+              fn=$(grep -m1 '"full_name"' "$out" | sed -E 's/.*"full_name":[[:space:]]*"([^"]+)".*/\1/')
+              echo "REPO_STATUS ${slug} OK full_name=${fn} rc=${rc}" | tee -a "$API"
+            else
+              first=$(head -c 200 "$out" | tr '\n' ' ')
+              echo "REPO_STATUS ${slug} FAIL rc=${rc} body=${first}" | tee -a "$API"
+            fi
+          }
+
+          check_repo "Antaru74/Random"
+          check_repo "ronardnx/penguin_frameworks_base"
+          check_repo "Project-PenguinOS/frameworks_base"
+          check_repo "Project-PenguinOS/packages_apps_Settings"
+
+          echo "API_DONE" | tee -a "$API"
           exit 0
 
       - name: Gate S00
         if: always()
         env:
-          JOB_STATUS: ${{ job.status }}
           RUN_ID: ${{ github.run_id }}
           SHA_FULL: ${{ github.sha }}
+          JOB_STATUS: ${{ job.status }}
         run: |
-          set +e
+          S00_LOG=/tmp/s00/s00.log
+          API=/tmp/s00/api.txt
+          [ -f "$S00_LOG" ] || : > "$S00_LOG"
+          [ -f "$API" ] || : > "$API"
 
           NDK_OK="NO"
-          if [ -n "${ANDROID_NDK_HOME:-}" ] && [ -d "${ANDROID_NDK_HOME}" ]; then
-            NDK_OK="YES"
-          fi
-          if grep -q "NDK r27 TIDAK ditemukan" s00.log; then NDK_OK="NO"; fi
+          if grep -q "NDK_DIR_OK: yes" "$S00_LOG"; then NDK_OK="YES"; fi
 
           API_OK="NO"
-          if grep -q '"full_name": "Antaru74/Random"' s00.log; then API_OK="YES"; fi
+          if grep -q "^REPO_STATUS Antaru74/Random OK " "$API"; then API_OK="YES"; fi
 
-          RATE_REMAIN=$(grep -m1 '"remaining"' s00.log | sed -E 's/.*"remaining":[[:space:]]*([0-9]+).*/\1/' || echo "?")
-          RATE_LIMIT=$(grep -m1 '"limit"' s00.log | sed -E 's/.*"limit":[[:space:]]*([0-9]+).*/\1/' || echo "?")
+          RATE_LINE=$(grep -m1 '"remaining"' "$S00_LOG" | tr -d ' \n' || true)
+          RATE_LINE="${RATE_LINE:-tidak-ada}"
 
           SHA7=$(printf '%s' "${SHA_FULL}" | cut -c1-7)
 
@@ -118,7 +140,7 @@ jobs:
 
           {
             echo "=== APPSPOOF BLOK LAPOR ==="
-            echo "STAGE: S00 r1"
+            echo "STAGE: S00 r2"
             echo "GATE: ${GATE}"
             echo "RUN: ${RUN_ID} ${SHA7}"
             echo "RINGKAS:"
@@ -126,25 +148,29 @@ jobs:
             echo "- Job status: ${JOB_STATUS}"
             echo "- NDK r27 terpasang: ${NDK_OK}"
             echo "- Akses API Antaru74/Random: ${API_OK}"
-            echo "- Rate limit: ${RATE_REMAIN}/${RATE_LIMIT} tersisa"
-            echo "- Log s00.log: $(wc -l < s00.log) baris"
+            echo "- Rate limit ringkas: ${RATE_LINE}"
+            echo "- s00.log: $(wc -l < "$S00_LOG") baris"
+            echo "- api.txt: $(wc -l < "$API") baris"
             echo "ARTIFACT: tidak ada"
             echo "LANGKAH_USER:"
             echo "1. Buka tab Summary run ini, salin seluruh blok ini ke chat."
-            echo "2. Bila GATE: FAIL, salin juga 60 baris terakhir log step 'Gate S00'."
+            echo "2. Salin juga bagian '--- RINGKAS API ---' (memuat baris REPO_STATUS)."
             echo "3. Jawab: 'lanjut S01' atau 'revisi S00'."
             echo "=== AKHIR ==="
-          } > gate_report.txt
+            echo ""
+            echo "--- RINGKAS API ---"
+            cat "$API"
+            echo "--- akhir ringkas api ---"
+            echo ""
+            echo "--- 40 baris terakhir s00.log ---"
+            tail -n 40 "$S00_LOG"
+            echo "--- akhir ---"
+          } > /tmp/s00/report.txt
 
-          cat gate_report.txt
-          cat gate_report.txt >> "${GITHUB_STEP_SUMMARY}"
+          cat /tmp/s00/report.txt
+          cat /tmp/s00/report.txt >> "${GITHUB_STEP_SUMMARY}"
 
           if [ "${GATE}" = "FAIL" ]; then
-            {
-              echo "--- 60 baris terakhir s00.log ---"
-              tail -n 60 s00.log
-              echo "--- akhir ---"
-            } | tee -a "${GITHUB_STEP_SUMMARY}"
             exit 1
           fi
           exit 0
