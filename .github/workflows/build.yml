@@ -1,8 +1,3 @@
-# =========================================================================
-# APPSPOOF — GitHub Actions build
-# BAGIAN 1 dari 3 (header + fetch deps + source C) — GABUNGKAN dengan BAGIAN 2 & 3
-# Nanti simpan sebagai .github/workflows/build.yml
-# =========================================================================
 name: Build AppSpoof
 on:
   workflow_dispatch:
@@ -40,10 +35,13 @@ jobs:
           curl -fsSL -o src/third_party/zygisk.hpp \
             "https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp"
           git clone --depth=1 https://github.com/bytedance/android-inline-hook.git /tmp/sh
+          mkdir -p src/third_party
+          rm -rf src/third_party/shadowhook
+          cp -r /tmp/sh/shadowhook src/third_party/shadowhook
           FW=54dcd6491b9f1c8612ae037ce94a0c6b22348bf4
           BASE="https://raw.githubusercontent.com/ronardnx/penguin_frameworks_base/$FW/core/java/com/android/internal/util/custom"
-          curl -fsSL -o docs/ref/PerAppsPropsUtils.java       "$BASE/PerAppsPropsUtils.java"
-          curl -fsSL -o docs/ref/AdvancedAppSpoofUtils.java   "$BASE/AdvancedAppSpoofUtils.java"
+          curl -fsSL -o docs/ref/PerAppsPropsUtils.java     "$BASE/PerAppsPropsUtils.java"
+          curl -fsSL -o docs/ref/AdvancedAppSpoofUtils.java "$BASE/AdvancedAppSpoofUtils.java"
           SET="https://raw.githubusercontent.com/Project-PenguinOS/packages_apps_Settings/41697be08ff1bf2760f6a7ec318db61e9adbe9bb"
           curl -fsSL -o docs/ref/custom_arrays.xml "$SET/res/values/custom_arrays.xml"
           curl -fsSL -o docs/ref/HW_SPOOF.kt \
@@ -284,3 +282,1070 @@ jobs:
 
           echo "C sources OK"
           ls -la src/
+
+      - name: Write source files (C++)
+        run: |
+          set -e
+
+          cat > src/build_spoof.cpp <<'X_EOF'
+          #include "build_spoof.h"
+          #include "presets_gen.h"
+          #include <string.h>
+
+          extern "C" {
+
+          static const struct appspoof_preset *find_preset(const char *code) {
+              if (!code || !*code) return 0;
+              for (int i = 0; i < appspoof_presets_count; ++i)
+                  if (strcmp(appspoof_presets[i].code, code) == 0) return &appspoof_presets[i];
+              return 0;
+          }
+
+          static int set_static_string(JNIEnv *env, jclass cls,
+                                       const char *field, const char *value) {
+              if (!value || value[0] == '\0') return 0;
+              jfieldID fid = env->GetStaticFieldID(cls, field, "Ljava/lang/String;");
+              if (!fid) { if (env->ExceptionCheck()) env->ExceptionClear(); return -1; }
+              jstring js = env->NewStringUTF(value);
+              if (!js) { if (env->ExceptionCheck()) env->ExceptionClear(); return -2; }
+              env->SetStaticObjectField(cls, fid, js);
+              env->DeleteLocalRef(js);
+              if (env->ExceptionCheck()) { env->ExceptionClear(); return -3; }
+              return 1;
+          }
+
+          int appspoof_build_apply(JNIEnv *env, const char *preset_code) {
+              if (!env || !preset_code || !*preset_code) return -100;
+              const struct appspoof_preset *p = find_preset(preset_code);
+              if (!p) return -101;
+              jclass cls = env->FindClass("android/os/Build");
+              if (!cls) { if (env->ExceptionCheck()) env->ExceptionClear(); return -102; }
+              int applied = 0;
+              int rc;
+              rc = set_static_string(env, cls, "BRAND",        p->brand);         if (rc == 1) applied++;
+              rc = set_static_string(env, cls, "MANUFACTURER", p->manufacturer);  if (rc == 1) applied++;
+              rc = set_static_string(env, cls, "DEVICE",       p->device);        if (rc == 1) applied++;
+              rc = set_static_string(env, cls, "MODEL",        p->model);         if (rc == 1) applied++;
+              rc = set_static_string(env, cls, "FINGERPRINT",  p->fingerprint);   if (rc == 1) applied++;
+              rc = set_static_string(env, cls, "PRODUCT",      p->product);       if (rc == 1) applied++;
+              env->DeleteLocalRef(cls);
+              return applied;
+          }
+
+          } /* extern "C" */
+          X_EOF
+
+          cat > src/hw_hooks.cpp <<'X_EOF'
+          #include "hw_hooks.h"
+          #include "hw_values_gen.h"
+          #include <string.h>
+          #include <stdlib.h>
+          #include <android/log.h>
+
+          #define TAG "APPSPOOF"
+          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+          #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
+
+          extern "C" {
+
+          static const struct appspoof_gpu_value *find_gpu(const char *k) {
+              if (!k || !*k) return 0;
+              for (int i = 0; i < appspoof_gpu_values_count; ++i)
+                  if (strcmp(appspoof_gpu_values[i].key, k) == 0) return &appspoof_gpu_values[i];
+              return 0;
+          }
+          static const struct appspoof_cpu_value *find_cpu(const char *k) {
+              if (!k || !*k) return 0;
+              for (int i = 0; i < appspoof_cpu_values_count; ++i)
+                  if (strcmp(appspoof_cpu_values[i].key, k) == 0) return &appspoof_cpu_values[i];
+              return 0;
+          }
+          static int set_static_string(JNIEnv *env, jclass cls,
+                                       const char *field, const char *value) {
+              if (!value || !*value) return 0;
+              jfieldID fid = env->GetStaticFieldID(cls, field, "Ljava/lang/String;");
+              if (!fid) { if (env->ExceptionCheck()) env->ExceptionClear(); return -1; }
+              jstring js = env->NewStringUTF(value);
+              if (!js) { if (env->ExceptionCheck()) env->ExceptionClear(); return -2; }
+              env->SetStaticObjectField(cls, fid, js);
+              env->DeleteLocalRef(js);
+              if (env->ExceptionCheck()) { env->ExceptionClear(); return -3; }
+              return 1;
+          }
+
+          int appspoof_hw_apply(JNIEnv *env, const char *gpu_key, const char *cpu_key) {
+              if (!env) return -100;
+              if (!gpu_key) gpu_key = "";
+              if (!cpu_key) cpu_key = "";
+              int applied = 0;
+              if (gpu_key[0]) {
+                  const struct appspoof_gpu_value *g = find_gpu(gpu_key);
+                  if (g) {
+                      (void)setenv("SPOOF_GPU_RENDERER",     g->renderer,  1);
+                      (void)setenv("SPOOF_GPU_VENDOR",       g->vendor,    1);
+                      (void)setenv("SPOOF_VULKAN_DEVICE",    g->vk_device, 1);
+                      (void)setenv("SPOOF_VULKAN_VENDOR_ID", g->vk_vendor, 1);
+                      LOGI("[HW] GPU env key=%s renderer=%s", gpu_key, g->renderer);
+                      applied++;
+                  } else {
+                      LOGW("[HW] GPU key tidak dikenal: %s", gpu_key);
+                  }
+              }
+              if (cpu_key[0]) {
+                  const struct appspoof_cpu_value *c = find_cpu(cpu_key);
+                  if (c) {
+                      jclass cls = env->FindClass("android/os/Build");
+                      if (cls) {
+                          if (set_static_string(env, cls, "HARDWARE",         c->hardware)  == 1) applied++;
+                          if (set_static_string(env, cls, "BOARD",            c->board)     == 1) applied++;
+                          if (set_static_string(env, cls, "SOC_MODEL",        c->soc_model) == 1) applied++;
+                          if (set_static_string(env, cls, "SOC_MANUFACTURER", c->soc_mfr)   == 1) applied++;
+                          env->DeleteLocalRef(cls);
+                          LOGI("[HW] CPU key=%s model=%s mfr=%s", cpu_key, c->soc_model, c->soc_mfr);
+                      } else {
+                          if (env->ExceptionCheck()) env->ExceptionClear();
+                      }
+                  } else {
+                      LOGW("[HW] CPU key tidak dikenal: %s", cpu_key);
+                  }
+              }
+              return applied;
+          }
+
+          } /* extern "C" */
+          X_EOF
+
+          cat > src/companion.cpp <<'X_EOF'
+          #include <zygisk.hpp>
+          #include <unistd.h>
+          #include <fcntl.h>
+          #include <string.h>
+          #include <stdint.h>
+          #include <stdio.h>
+          #include <stdarg.h>
+          #include <time.h>
+          #include <sys/stat.h>
+
+          #include "companion_proto.h"
+          #include "device_rules.h"
+          #include "hw_rules.h"
+
+          #define APPSPOOF_CFG_DEVICE     "/data/adb/appspoof/device.conf"
+          #define APPSPOOF_CFG_DEVICE_EN  "/data/adb/appspoof/device_enabled"
+          #define APPSPOOF_CFG_HW         "/data/adb/appspoof/hw.conf"
+          #define APPSPOOF_CFG_HW_EN      "/data/adb/appspoof/hw_enabled"
+          #define APPSPOOF_CFG_DISABLE    "/data/adb/appspoof/DISABLE"
+          #define APPSPOOF_LOG_PATH       "/data/local/tmp/appspoof.log"
+
+          static void klogf(const char *tag, const char *fmt, ...) {
+              char body[480];
+              int n = snprintf(body, sizeof(body), "[%s] ", tag);
+              va_list ap; va_start(ap, fmt);
+              n += vsnprintf(body + n, sizeof(body) - n, fmt, ap);
+              va_end(ap);
+              int kfd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+              if (kfd >= 0) {
+                  char line[560];
+                  int m = snprintf(line, sizeof(line), "<4>APPSPOOF %s\n", body);
+                  if (m > 0) { ssize_t _ = write(kfd, line, (size_t)m); (void)_; }
+                  close(kfd);
+              }
+              FILE *f = fopen(APPSPOOF_LOG_PATH, "a");
+              if (f) {
+                  time_t t = time(NULL);
+                  struct tm tmv; localtime_r(&t, &tmv);
+                  char ts[32];
+                  strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", &tmv);
+                  fprintf(f, "[%s] %s\n", ts, body);
+                  fclose(f);
+                  chmod(APPSPOOF_LOG_PATH, 0644);
+              }
+          }
+
+          static int file_exists(const char *p) { return access(p, F_OK) == 0; }
+          static int flag_on(const char *p) {
+              FILE *f = fopen(p, "r"); if (!f) return 0;
+              int c = fgetc(f); fclose(f); return c == '1' ? 1 : 0;
+          }
+          static ssize_t read_full(int fd, void *buf, size_t want) {
+              ssize_t got = 0;
+              while ((size_t)got < want) {
+                  ssize_t n = read(fd, (char *)buf + got, want - (size_t)got);
+                  if (n <= 0) return got; got += n;
+              }
+              return got;
+          }
+          static ssize_t write_full(int fd, const void *buf, size_t want) {
+              ssize_t put = 0;
+              while ((size_t)put < want) {
+                  ssize_t n = write(fd, (const char *)buf + put, want - (size_t)put);
+                  if (n <= 0) return put; put += n;
+              }
+              return put;
+          }
+
+          static void companion_main(int fd) {
+              struct companion_reply reply;
+              memset(&reply, 0, sizeof(reply));
+              char pkg[APPSPOOF_CP_PKG_MAX];
+              memset(pkg, 0, sizeof(pkg));
+              ssize_t n = read_full(fd, pkg, sizeof(pkg) - 1);
+              if (n <= 0) { klogf("COMP", "read gagal n=%zd", n); return; }
+              pkg[sizeof(pkg) - 1] = '\0';
+
+              if (file_exists(APPSPOOF_CFG_DISABLE)) {
+                  reply.disabled = 1;
+                  klogf("COMP", "DISABLE pkg=%s", pkg);
+                  (void)write_full(fd, &reply, sizeof(reply));
+                  return;
+              }
+              if (flag_on(APPSPOOF_CFG_DEVICE_EN)) {
+                  struct appspoof_device_rules dr; dr.count = 0;
+                  (void)appspoof_device_rules_load(APPSPOOF_CFG_DEVICE, &dr);
+                  const struct appspoof_device_rule *r = appspoof_device_rules_find(&dr, pkg);
+                  if (r) { reply.has_device = 1;
+                           strncpy(reply.device_code, r->code, sizeof(reply.device_code) - 1); }
+              }
+              if (flag_on(APPSPOOF_CFG_HW_EN)) {
+                  struct appspoof_hw_rules hr; hr.count = 0;
+                  (void)appspoof_hw_rules_load(APPSPOOF_CFG_HW, &hr);
+                  const struct appspoof_hw_rule *r = appspoof_hw_rules_find(&hr, pkg);
+                  if (r) { reply.has_hw = 1;
+                           strncpy(reply.hw_gpu, r->gpu, sizeof(reply.hw_gpu) - 1);
+                           strncpy(reply.hw_cpu, r->cpu, sizeof(reply.hw_cpu) - 1); }
+              }
+              if (reply.has_device || reply.has_hw) {
+                  klogf("COMP", "HIT pkg=%s dev=%d code=%s hw=%d gpu=%s cpu=%s",
+                        pkg, reply.has_device, reply.device_code,
+                        reply.has_hw, reply.hw_gpu, reply.hw_cpu);
+              } else {
+                  klogf("COMP", "MISS pkg=%s", pkg);
+              }
+              (void)write_full(fd, &reply, sizeof(reply));
+          }
+
+          REGISTER_ZYGISK_COMPANION(companion_main)
+          X_EOF
+
+          cat > src/zygisk_module.cpp <<'X_EOF'
+          #include "zygisk_compat.h"
+          #include <jni.h>
+          #include <unistd.h>
+          #include <string.h>
+          #include <android/log.h>
+
+          #include "companion_proto.h"
+          #include "build_spoof.h"
+          #include "hw_hooks.h"
+
+          #define APPSPOOF_TAG "APPSPOOF"
+          #define L(level, stage, ...) \
+              __android_log_print(level, APPSPOOF_TAG, "[" stage "] " __VA_ARGS__)
+
+          static int  g_has_device = 0;
+          static char g_device_code[APPSPOOF_CP_CODE_MAX];
+          static int  g_has_hw = 0;
+          static char g_hw_gpu[APPSPOOF_CP_KEY_MAX];
+          static char g_hw_cpu[APPSPOOF_CP_KEY_MAX];
+
+          static ssize_t io_write_full(int fd, const void *buf, size_t want) {
+              ssize_t put = 0;
+              while ((size_t)put < want) {
+                  ssize_t n = write(fd, (const char *)buf + put, want - (size_t)put);
+                  if (n <= 0) return put; put += n;
+              }
+              return put;
+          }
+          static ssize_t io_read_full(int fd, void *buf, size_t want) {
+              ssize_t got = 0;
+              while ((size_t)got < want) {
+                  ssize_t n = read(fd, (char *)buf + got, want - (size_t)got);
+                  if (n <= 0) return got; got += n;
+              }
+              return got;
+          }
+
+          class AppSpoofModule : public zygisk::ModuleBase {
+          public:
+              void onLoad(zygisk::Api *api_, JNIEnv *env_) override {
+                  this->api = api_; this->env = env_;
+                  L(ANDROID_LOG_INFO, "BOOT", "onLoad zygisk API=%d", ZYGISK_API_VERSION);
+              }
+              void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
+                  g_has_device = 0; g_has_hw = 0;
+                  g_device_code[0] = '\0'; g_hw_gpu[0] = '\0'; g_hw_cpu[0] = '\0';
+                  if (!args || !args->nice_name) { L(ANDROID_LOG_WARN, "PRE", "skip: no nice_name"); skip(); return; }
+                  const char *nice = env->GetStringUTFChars(args->nice_name, nullptr);
+                  if (!nice) { if (env->ExceptionCheck()) env->ExceptionClear();
+                               L(ANDROID_LOG_WARN, "PRE", "skip: GetStringUTFChars null"); skip(); return; }
+                  char pkg[APPSPOOF_CP_PKG_MAX];
+                  strncpy(pkg, nice, sizeof(pkg) - 1); pkg[sizeof(pkg) - 1] = '\0';
+                  env->ReleaseStringUTFChars(args->nice_name, nice);
+                  char *colon = strchr(pkg, ':'); if (colon) *colon = '\0';
+                  if (pkg[0] == '\0') { L(ANDROID_LOG_WARN, "PRE", "skip: pkg empty"); skip(); return; }
+                  L(ANDROID_LOG_INFO, "PRE", "pkg=%s", pkg);
+                  int fd = api->connectCompanion();
+                  if (fd < 0) { L(ANDROID_LOG_ERROR, "PRE", "connectCompanion fd=%d", fd); skip(); return; }
+                  L(ANDROID_LOG_INFO, "PRE", "companion fd=%d", fd);
+                  size_t plen = strlen(pkg) + 1;
+                  if (io_write_full(fd, pkg, plen) != (ssize_t)plen) {
+                      L(ANDROID_LOG_ERROR, "PRE", "write pkg gagal"); close(fd); skip(); return;
+                  }
+                  struct companion_reply reply;
+                  memset(&reply, 0, sizeof(reply));
+                  ssize_t n = io_read_full(fd, &reply, sizeof(reply));
+                  close(fd);
+                  if (n != (ssize_t)sizeof(reply)) {
+                      L(ANDROID_LOG_ERROR, "PRE", "reply n=%zd expect=%zu", n, sizeof(reply));
+                      skip(); return;
+                  }
+                  if (reply.disabled) { L(ANDROID_LOG_WARN, "PRE", "kill-switch ON"); skip(); return; }
+                  if (reply.has_device) { g_has_device = 1;
+                      strncpy(g_device_code, reply.device_code, sizeof(g_device_code) - 1); }
+                  if (reply.has_hw) { g_has_hw = 1;
+                      strncpy(g_hw_gpu, reply.hw_gpu, sizeof(g_hw_gpu) - 1);
+                      strncpy(g_hw_cpu, reply.hw_cpu, sizeof(g_hw_cpu) - 1); }
+                  if (!g_has_device && !g_has_hw) {
+                      L(ANDROID_LOG_INFO, "PRE", "pkg=%s bukan target", pkg); skip(); return;
+                  }
+                  L(ANDROID_LOG_INFO, "PRE", "TARGET pkg=%s dev=%d hw=%d code=%s",
+                    pkg, g_has_device, g_has_hw, g_device_code);
+              }
+              void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
+                  (void)args;
+                  if (g_has_device) {
+                      int rc = appspoof_build_apply(env, g_device_code);
+                      if (rc > 0) L(ANDROID_LOG_INFO, "POST-DEV", "code=%s fields=%d SUCCESS", g_device_code, rc);
+                      else        L(ANDROID_LOG_ERROR, "POST-DEV", "code=%s rc=%d FAIL", g_device_code, rc);
+                  }
+                  if (g_has_hw) {
+                      int rc = appspoof_hw_apply(env, g_hw_gpu, g_hw_cpu);
+                      if (rc >= 0) L(ANDROID_LOG_INFO, "POST-HW", "gpu=%s cpu=%s fields=%d SUCCESS",
+                                     g_hw_gpu, g_hw_cpu, rc);
+                      else         L(ANDROID_LOG_ERROR, "POST-HW", "gpu=%s cpu=%s rc=%d FAIL",
+                                     g_hw_gpu, g_hw_cpu, rc);
+                  }
+              }
+          private:
+              zygisk::Api *api = nullptr;
+              JNIEnv *env = nullptr;
+              void skip() { if (api) api->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY); }
+          };
+
+          REGISTER_ZYGISK_MODULE(AppSpoofModule)
+          X_EOF
+
+          echo "C++ sources OK"
+          ls -la src/
+
+      - name: Write Python extractors
+        run: |
+          set -e
+          cat > tools_extract_presets.py <<'X_EOF'
+          #!/usr/bin/env python3
+          import re, pathlib, xml.etree.ElementTree as ET
+
+          JAVA = pathlib.Path("docs/ref/PerAppsPropsUtils.java")
+          ARR  = pathlib.Path("docs/ref/custom_arrays.xml")
+          OUT  = pathlib.Path("src/presets.tsv")
+
+          FUNC_RE = re.compile(r'private\s+static\s+Map(?:<[^>]*>)?\s+create(\w+?)Props\s*\(\s*\)\s*\{')
+          PUT_RE  = re.compile(r'props\.put\(\s*"([A-Z]+)"\s*,\s*"((?:[^"\\]|\\.)*)"\s*\)\s*;')
+
+          def unescape(s):
+              out, i = [], 0
+              while i < len(s):
+                  if s[i] == '\\' and i + 1 < len(s):
+                      n = s[i+1]
+                      if n == 'n': out.append('\n'); i += 2; continue
+                      if n == 't': out.append('\t'); i += 2; continue
+                      if n == '"': out.append('"');  i += 2; continue
+                      if n == '\\': out.append('\\'); i += 2; continue
+                  out.append(s[i]); i += 1
+              return ''.join(out)
+
+          def match_brace(text, start):
+              depth = 1; j = start
+              while j < len(text) and depth > 0:
+                  c = text[j]
+                  if c == '{': depth += 1
+                  elif c == '}': depth -= 1
+                  j += 1
+              return text[start:j-1]
+
+          def parse_java():
+              t = JAVA.read_text(encoding="utf-8")
+              presets = {}
+              for m in FUNC_RE.finditer(t):
+                  code = m.group(1); body = match_brace(t, m.end())
+                  props = {}
+                  for pm in PUT_RE.finditer(body): props[pm.group(1)] = unescape(pm.group(2))
+                  presets[code] = props
+              return presets
+
+          def parse_labels():
+              text = ARR.read_text(encoding="utf-8", errors="replace")
+              try: root = ET.fromstring(text)
+              except ET.ParseError: root = ET.fromstring(f"<root>{text}</root>")
+              vals = lbls = None
+              for el in root.iter():
+                  tag = el.tag.split('}')[-1]
+                  if tag != "string-array": continue
+                  name = el.get("name")
+                  items = [(it.text or "").strip() for it in el if it.tag.split('}')[-1] == "item"]
+                  if name == "perapp_spoof_profile_values": vals = items
+                  if name == "perapp_spoof_profile_labels": lbls = items
+              if not vals or not lbls or len(vals) != len(lbls):
+                  raise SystemExit("labels mismatch")
+              return dict(zip(vals, lbls))
+
+          presets = parse_java(); labels = parse_labels()
+          order = [c for c in labels.keys() if c != "None" and c in presets]
+          OUT.parent.mkdir(parents=True, exist_ok=True)
+          with OUT.open("w", encoding="utf-8") as f:
+              f.write("code\tlabel\tbrand\tmanufacturer\tdevice\tmodel\tfingerprint\tproduct\tsource\n")
+              for code in order:
+                  p = presets[code]
+                  row = [code, labels[code],
+                         p.get("BRAND",""), p.get("MANUFACTURER",""),
+                         p.get("DEVICE",""), p.get("MODEL",""),
+                         p.get("FINGERPRINT",""), p.get("PRODUCT",""),
+                         "docs/ref/PerAppsPropsUtils.java"]
+                  for v in row:
+                      if "\t" in v or "\n" in v: raise SystemExit(f"tab in {code}")
+                  f.write("\t".join(row) + "\n")
+          print(f"presets.tsv: {len(order)} entries")
+          X_EOF
+
+          cat > tools_extract_hw.py <<'X_EOF'
+          #!/usr/bin/env python3
+          import re, pathlib
+
+          JAVA = pathlib.Path("docs/ref/AdvancedAppSpoofUtils.java")
+          GPU_OUT = pathlib.Path("src/hw_gpu.tsv")
+          CPU_OUT = pathlib.Path("src/hw_cpu.tsv")
+          TPL = pathlib.Path("src/hw_templates"); TPL.mkdir(parents=True, exist_ok=True)
+
+          def unescape(s):
+              out, i = [], 0
+              while i < len(s):
+                  if s[i] == '\\' and i + 1 < len(s):
+                      n = s[i+1]
+                      if n == 'n': out.append('\n'); i += 2; continue
+                      if n == 't': out.append('\t'); i += 2; continue
+                      if n == 'r': out.append('\r'); i += 2; continue
+                      if n == '"': out.append('"');  i += 2; continue
+                      if n == '\\': out.append('\\'); i += 2; continue
+                  out.append(s[i]); i += 1
+              return ''.join(out)
+
+          def read_str(text, start):
+              i = start
+              while i < len(text) and text[i] != '"': i += 1
+              if i >= len(text): return ('', start)
+              i += 1
+              buf = []
+              while i < len(text):
+                  c = text[i]
+                  if c == '\\':
+                      if i + 1 < len(text): buf.append(text[i:i+2]); i += 2; continue
+                      i += 1; continue
+                  if c == '"':
+                      res = unescape(''.join(buf)); buf = []
+                      i += 1
+                      j = i
+                      while j < len(text) and text[j] in ' \t\r\n': j += 1
+                      if j < len(text) and text[j] == '+':
+                          j += 1
+                          while j < len(text) and text[j] in ' \t\r\n': j += 1
+                          if j < len(text) and text[j] == '"':
+                              i = j + 1; continue
+                      return (res, i)
+                  buf.append(c); i += 1
+              return ('', i)
+
+          text = JAVA.read_text(encoding="utf-8")
+
+          def read_fields(start, nfields):
+              i = start; fields = []
+              while i < len(text) and len(fields) < nfields:
+                  while i < len(text) and text[i] in ' \t\r\n,': i += 1
+                  if i >= len(text): break
+                  if text[i] == '}': break
+                  if text[i] == '"':
+                      s, i = read_str(text, i); fields.append(s)
+                  else: break
+              return fields
+
+          gpu = []
+          for m in re.finditer(r'GPU_PRESETS\.put\(\s*"([^"]+)"\s*,\s*new\s+String\[\]\s*\{', text):
+              k = m.group(1); f = read_fields(m.end(), 4)
+              if len(f) == 4: gpu.append([k] + f)
+
+          cpu = []
+          for m in re.finditer(r'CPU_PRESETS\.put\(\s*"([^"]+)"\s*,\s*new\s+String\[\]\s*\{', text):
+              k = m.group(1); f = read_fields(m.end(), 5)
+              if len(f) == 5: cpu.append([k] + f)
+
+          with GPU_OUT.open("w", encoding="utf-8") as f:
+              f.write("key\trenderer\tvendor\tvk_device\tvk_vendor\tsource\n")
+              for k, r, v, vkd, vkv in gpu:
+                  f.write("\t".join([k, r, v, vkd, vkv, "docs/ref/AdvancedAppSpoofUtils.java"]) + "\n")
+
+          with CPU_OUT.open("w", encoding="utf-8") as f:
+              f.write("key\thardware\tsoc_model\tsoc_mfr\tboard\ttemplate_file\tsource\n")
+              for row in cpu:
+                  k, hw, soc, mfr, board, tpl = row
+                  tpl_path = TPL / (k + ".cpuinfo")
+                  tpl_path.write_text(tpl, encoding="utf-8")
+                  f.write("\t".join([k, hw, soc, mfr, board,
+                                     f"src/hw_templates/{k}.cpuinfo",
+                                     "docs/ref/AdvancedAppSpoofUtils.java"]) + "\n")
+
+          print(f"hw_gpu.tsv={len(gpu)}  hw_cpu.tsv={len(cpu)}")
+          X_EOF
+
+          cat > tools_gen_headers.py <<'X_EOF'
+          #!/usr/bin/env python3
+          import pathlib
+
+          def esc(s): return s.replace("\\","\\\\").replace('"','\\"')
+
+          def read_tsv(p, ncol):
+              rows = []
+              for ln in p.read_text(encoding="utf-8").splitlines():
+                  if not ln or ln.startswith("#"): continue
+                  parts = ln.split("\t")
+                  if parts[0] == "key": continue
+                  if len(parts) != ncol: continue
+                  rows.append(parts)
+              return rows
+
+          prows = read_tsv(pathlib.Path("src/presets.tsv"), 9)
+          hrows = read_tsv(pathlib.Path("src/hw_models.tsv"), 4)
+          grows = read_tsv(pathlib.Path("src/hw_gpu.tsv"), 6)
+          crows = read_tsv(pathlib.Path("src/hw_cpu.tsv"), 7)
+
+          with open("src/presets_gen.h", "w") as f:
+              f.write("#pragma once\nstruct appspoof_preset { const char *code,*label,*brand,*manufacturer,*device,*model,*fingerprint,*product; };\n")
+              f.write(f"static const struct appspoof_preset appspoof_presets[{max(len(prows),1)}] = {{\n")
+              for r in prows:
+                  f.write('  { ' + ','.join(f'"{esc(x)}"' for x in r[:8]) + ' },\n')
+              if not prows: f.write('  { "","","","","","","","" },\n')
+              f.write("};\n")
+              f.write(f"static const int appspoof_presets_count = {len(prows)};\n")
+
+          with open("src/hw_models_gen.h", "w") as f:
+              f.write("#pragma once\nstruct appspoof_hw_model { const char *key; const char *label; };\n")
+              g = [r for r in hrows if r[0]=="gpu"]; c = [r for r in hrows if r[0]=="cpu"]
+              f.write(f"static const struct appspoof_hw_model appspoof_gpu_models[{max(len(g),1)}] = {{\n")
+              for r in g: f.write(f'  {{ "{esc(r[1])}", "{esc(r[2])}" }},\n')
+              if not g: f.write('  { "","" },\n')
+              f.write("};\n")
+              f.write(f"static const int appspoof_gpu_models_count = {len(g)};\n")
+              f.write(f"static const struct appspoof_hw_model appspoof_cpu_models[{max(len(c),1)}] = {{\n")
+              for r in c: f.write(f'  {{ "{esc(r[1])}", "{esc(r[2])}" }},\n')
+              if not c: f.write('  { "","" },\n')
+              f.write("};\n")
+              f.write(f"static const int appspoof_cpu_models_count = {len(c)};\n")
+
+          with open("src/hw_values_gen.h", "w") as f:
+              f.write("#pragma once\nstruct appspoof_gpu_value { const char *key,*renderer,*vendor,*vk_device,*vk_vendor; };\n")
+              f.write(f"static const struct appspoof_gpu_value appspoof_gpu_values[{max(len(grows),1)}] = {{\n")
+              for r in grows: f.write('  { ' + ','.join(f'"{esc(x)}"' for x in r[:5]) + ' },\n')
+              if not grows: f.write('  { "","","","","" },\n')
+              f.write("};\n")
+              f.write(f"static const int appspoof_gpu_values_count = {len(grows)};\n")
+              f.write("struct appspoof_cpu_value { const char *key,*hardware,*soc_model,*soc_mfr,*board; };\n")
+              f.write(f"static const struct appspoof_cpu_value appspoof_cpu_values[{max(len(crows),1)}] = {{\n")
+              for r in crows: f.write('  { ' + ','.join(f'"{esc(x)}"' for x in r[:5]) + ' },\n')
+              if not crows: f.write('  { "","","","","" },\n')
+              f.write("};\n")
+              f.write(f"static const int appspoof_cpu_values_count = {len(crows)};\n")
+
+          print(f"presets={len(prows)} hw_models={len(hrows)} hw_gpu={len(grows)} hw_cpu={len(crows)}")
+          X_EOF
+
+          cat > tools_gen_webroot.py <<'X_EOF'
+          #!/usr/bin/env python3
+          import pathlib, json
+          prows = []
+          for ln in pathlib.Path("src/presets.tsv").read_text(encoding="utf-8").splitlines()[1:]:
+              if not ln: continue
+              c, label, brand, mfg, device, model, fp, prod, _ = ln.split("\t")
+              prows.append((c, {"label": label, "brand": brand, "manufacturer": mfg,
+                                "device": device, "model": model,
+                                "fingerprint": fp, "product": prod}))
+          grows = {}; crows = {}
+          for ln in pathlib.Path("src/hw_gpu.tsv").read_text(encoding="utf-8").splitlines()[1:]:
+              if not ln: continue
+              k, rnd, *_ = ln.split("\t"); grows[k] = rnd
+          for ln in pathlib.Path("src/hw_cpu.tsv").read_text(encoding="utf-8").splitlines()[1:]:
+              if not ln: continue
+              k, hw, soc, mfr, *_ = ln.split("\t"); crows[k] = f"{soc} ({mfr})"
+          out = [
+              "// AUTO-GENERATED",
+              "window.APPSPOOF_PRESETS = " + json.dumps(dict(prows), ensure_ascii=False, indent=2) + ";",
+              "window.APPSPOOF_GPU = " + json.dumps(grows, ensure_ascii=False, indent=2) + ";",
+              "window.APPSPOOF_CPU = " + json.dumps(crows, ensure_ascii=False, indent=2) + ";",
+              "",
+          ]
+          pathlib.Path("module/webroot/presets.js").write_text("\n".join(out), encoding="utf-8")
+          print("presets.js OK")
+          X_EOF
+
+          python3 tools_extract_presets.py
+          python3 tools_extract_hw.py
+
+          python3 - <<'PY'
+          import pathlib
+          out = pathlib.Path("src/hw_models.tsv")
+          lines = ["kind\tkey\tlabel\tsource"]
+          for ln in pathlib.Path("src/hw_gpu.tsv").read_text(encoding="utf-8").splitlines()[1:]:
+              if not ln: continue
+              k, rnd, *_ = ln.split("\t")
+              lines.append(f"gpu\t{k}\t{rnd}\tsrc/hw_gpu.tsv")
+          for ln in pathlib.Path("src/hw_cpu.tsv").read_text(encoding="utf-8").splitlines()[1:]:
+              if not ln: continue
+              k, hw, soc, mfr, board, tpl, _src = ln.split("\t")
+              lines.append(f"cpu\t{k}\t{soc} ({mfr})\tsrc/hw_cpu.tsv")
+          out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          print(f"hw_models.tsv: {len(lines)-1}")
+          PY
+
+          python3 tools_gen_headers.py
+          python3 tools_gen_webroot.py
+
+      - name: Compile with Android NDK
+        run: |
+          set -e
+          NDK="${ANDROID_NDK_HOME}"
+          TCBIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CC="$TCBIN/aarch64-linux-android24-clang"
+          CXX="$TCBIN/aarch64-linux-android24-clang++"
+          SH=src/third_party/shadowhook/shadowhook/src/main/cpp
+          [ -d "$SH" ] || { echo "shadowhook missing"; exit 1; }
+
+          INC_SH="-I$SH -I$SH/include -I$SH/arch/arm64 -I$SH/common -I$SH/third_party/xdl -I$SH/third_party/bsd -I$SH/third_party/lss"
+          INC_MOD="-Isrc -Isrc/third_party -I$SH/include"
+
+          mkdir -p build/sh build/mod
+
+          for c in "$SH"/*.c "$SH"/arch/arm64/*.c "$SH"/common/*.c "$SH"/third_party/*/*.c; do
+            [ -f "$c" ] || continue
+            name=$(basename "$c" .c); dir=$(basename "$(dirname "$c")")
+            case "$dir" in
+              cpp) o="build/sh/${name}.o" ;;
+              *)   o="build/sh/${dir}__${name}.o" ;;
+            esac
+            "$CC" -std=c11 -O2 -fPIC -fvisibility=hidden -Wno-everything $INC_SH -c "$c" -o "$o"
+          done
+          for s in "$SH"/arch/arm64/*.S; do
+            [ -f "$s" ] || continue
+            "$CC" -fPIC $INC_SH -c "$s" -o "build/sh/asm__$(basename "$s" .S).o"
+          done
+          for f in device_rules hw_rules; do
+            "$CC" -std=c11 -O2 -fPIC -fvisibility=hidden -Wno-everything $INC_MOD -c "src/$f.c" -o "build/mod/$f.o"
+          done
+          for f in build_spoof hw_hooks zygisk_module companion; do
+            "$CXX" -std=c++17 -O2 -fPIC -fvisibility=hidden -fno-exceptions -fno-rtti -Wno-everything $INC_MOD -c "src/$f.cpp" -o "build/mod/$f.o"
+          done
+
+          "$CXX" -shared -static-libstdc++ -Wl,--no-undefined \
+            -Wl,-z,max-page-size=16384 -Wl,--hash-style=sysv \
+            -o build/libzygisk.so build/mod/*.o build/sh/*.o
+
+          echo "--- pre-strip ---"
+          readelf -d build/libzygisk.so | grep -E 'NEEDED|RPATH|RUNPATH' || true
+          patchelf --remove-rpath build/libzygisk.so || true
+          echo "--- post-strip ---"
+          readelf -d build/libzygisk.so | grep -E 'NEEDED|RPATH|RUNPATH' || true
+          nm -D build/libzygisk.so | grep -E 'zygisk_(module|companion)_entry' || { echo "FAIL: entry hilang"; exit 1; }
+          ls -la build/libzygisk.so
+
+      - name: Write module files
+        run: |
+          set -e
+          cat > module/module.prop <<'X_EOF'
+          id=appspoof_zygisk
+          name=AppSpoof
+          version=v1.0.0-gh
+          versionCode=1
+          author=APPSPOOF
+          description=Per-app device & CPU/GPU spoofing. Zygisk + WebUI. Kill-switch /data/adb/appspoof/DISABLE.
+          X_EOF
+
+          cat > module/customize.sh <<'X_EOF'
+          #!/system/bin/sh
+          SKIPUNZIP=0
+          ui_print "- APPSPOOF: customize"
+          set_perm_recursive "$MODPATH" 0 0 0755 0644
+          [ -d "$MODPATH/bin" ] && set_perm_recursive "$MODPATH/bin" 0 0 0755 0755
+          [ -d "$MODPATH/webroot" ] && set_perm_recursive "$MODPATH/webroot" 0 0 0755 0644
+          [ -d "$MODPATH/zygisk" ] && set_perm_recursive "$MODPATH/zygisk" 0 0 0755 0644
+          CFG=/data/adb/appspoof
+          mkdir -p "$CFG"; chmod 0700 "$CFG" 2>/dev/null
+          [ -f "$CFG/device.conf" ] || : > "$CFG/device.conf"
+          [ -f "$CFG/hw.conf" ]     || : > "$CFG/hw.conf"
+          [ -f "$CFG/device_enabled" ] || printf '1\n' > "$CFG/device_enabled"
+          [ -f "$CFG/hw_enabled" ]     || printf '1\n' > "$CFG/hw_enabled"
+          chmod 0600 "$CFG"/* 2>/dev/null
+          ui_print "- APPSPOOF: done"
+          X_EOF
+
+          cat > module/uninstall.sh <<'X_EOF'
+          #!/system/bin/sh
+          set -u
+          CFG=/data/adb/appspoof
+          case "$CFG" in /data/adb/appspoof) : ;; *) exit 1 ;; esac
+          [ -d "$CFG" ] && rm -rf "${CFG:?}"
+          [ -f /data/local/tmp/appspoof.log ] && rm -f /data/local/tmp/appspoof.log
+          exit 0
+          X_EOF
+
+          cat > module/bin/appspoofctl.sh <<'X_EOF'
+          #!/system/bin/sh
+          set -eu
+          CFG=/data/adb/appspoof
+          DC=$CFG/device.conf; HC=$CFG/hw.conf
+          DE=$CFG/device_enabled; HE=$CFG/hw_enabled
+          DIS=$CFG/DISABLE; LOG=/data/local/tmp/appspoof.log
+          LOCK=$CFG/.lock
+          init(){ mkdir -p "$CFG"; [ -f "$DC" ]||:>"$DC"; [ -f "$HC" ]||:>"$HC"
+                  [ -f "$DE" ]||printf '1\n'>"$DE"; [ -f "$HE" ]||printf '1\n'>"$HE"
+                  chmod 0600 "$DC" "$HC" "$DE" "$HE" 2>/dev/null||true; }
+          log(){ printf '[%s] [%s] %s\n' "$(date -u +%FT%TZ)" "$1" "$2" >> "$LOG" 2>/dev/null||true
+                chmod 0644 "$LOG" 2>/dev/null||true; }
+          locka(){ i=0; while ! mkdir "$LOCK" 2>/dev/null; do i=$((i+1)); [ $i -ge 20 ]&&exit 1; sleep 1; done; }
+          lockr(){ rmdir "$LOCK" 2>/dev/null||true; }
+          force_stop(){ [ -n "${1:-}" ] && am force-stop "$1" >/dev/null 2>&1||true; log GLOBAL "force-stop $1"; }
+          dlist(){ awk -F'\t' '!/^#/ && NF>0 {print}' "$DC" 2>/dev/null||true; }
+          dset(){ p=$1; c=$2; locka
+            tmp="$DC.tmp.$$"
+            awk -F'\t' -v p="$p" -v c="$c" 'BEGIN{f=0}/^#/{print;next}NF==0{next}{if($1==p){print p"\t"c;f=1}else print}END{if(!f)print p"\t"c}' "$DC">"$tmp"
+            mv "$tmp" "$DC"; lockr; force_stop "$p"; log DEVICE "set $p=$c"; }
+          drm(){ p=$1; locka
+            tmp="$DC.tmp.$$"; awk -F'\t' -v p="$p" '!/^#/ && NF>0 && $1==p{next}{print}' "$DC">"$tmp"
+            mv "$tmp" "$DC"; lockr; force_stop "$p"; log DEVICE "remove $p"; }
+          dcl(){ pk=$(awk -F'\t' '!/^#/&&NF>0{print $1}' "$DC"); :>"$DC"; for p in $pk; do force_stop "$p"; done; log DEVICE clear; }
+          hlist(){ awk -F'\t' '!/^#/ && NF>0 {print}' "$HC" 2>/dev/null||true; }
+          hset(){ p=$1; g=$2; c=$3; locka
+            tmp="$HC.tmp.$$"
+            awk -F'\t' -v p="$p" -v g="$g" -v c="$c" 'BEGIN{f=0}/^#/{print;next}NF==0{next}{if($1==p){print p"\t"g"\t"c;f=1}else print}END{if(!f)print p"\t"g"\t"c}' "$HC">"$tmp"
+            mv "$tmp" "$HC"; lockr; force_stop "$p"; log HW "set $p $g $c"; }
+          hrm(){ p=$1; locka
+            tmp="$HC.tmp.$$"; awk -F'\t' -v p="$p" '!/^#/ && NF>0 && $1==p{next}{print}' "$HC">"$tmp"
+            mv "$tmp" "$HC"; lockr; force_stop "$p"; log HW "remove $p"; }
+          hcl(){ pk=$(awk -F'\t' '!/^#/&&NF>0{print $1}' "$HC"); :>"$HC"; for p in $pk; do force_stop "$p"; done; log HW clear; }
+          stat(){ echo "device_enabled=$(cat "$DE" 2>/dev/null||echo ?)"
+                  echo "hw_enabled=$(cat "$HE" 2>/dev/null||echo ?)"
+                  [ -f "$DIS" ] && echo "kill-switch=AKTIF" || echo "kill-switch=off"
+                  echo "device_rules=$(awk -F'\t' '!/^#/&&NF>0' "$DC"|wc -l)"
+                  echo "hw_rules=$(awk -F'\t' '!/^#/&&NF>0' "$HC"|wc -l)"; }
+          init
+          cmd="${1:-}"; shift 2>/dev/null||true
+          case "$cmd" in
+            device) s="${1:-}"; shift||true
+              case "$s" in
+                list) dlist ;;
+                set) dset "${1:?}" "${2:?}" ;;
+                remove) drm "${1:?}" ;;
+                clear) dcl ;;
+                enable) printf '1\n'>"$DE"; log DEVICE enable ;;
+                disable) printf '0\n'>"$DE"; log DEVICE disable ;;
+                status) cat "$DE" ;;
+              esac ;;
+            hw) s="${1:-}"; shift||true
+              case "$s" in
+                list) hlist ;;
+                set) hset "${1:?}" "${2:-}" "${3:-}" ;;
+                remove) hrm "${1:?}" ;;
+                clear) hcl ;;
+                enable) printf '1\n'>"$HE"; log HW enable ;;
+                disable) printf '0\n'>"$HE"; log HW disable ;;
+                status) cat "$HE" ;;
+              esac ;;
+            log) t="${1:-all}"; n="${2:-50}"
+              case "$t" in
+                device) grep -F '[DEVICE]' "$LOG" 2>/dev/null|tail -n "$n"||true ;;
+                hw) grep -F '[HW]' "$LOG" 2>/dev/null|tail -n "$n"||true ;;
+                *) tail -n "$n" "$LOG" 2>/dev/null||true ;;
+              esac ;;
+            disable-all) :>"$DIS"; echo "DISABLE"; log GLOBAL disable-all ;;
+            enable-all) rm -f "$DIS"; echo "enabled"; log GLOBAL enable-all ;;
+            status) stat ;;
+            *) echo "usage: appspoofctl {device|hw|log|disable-all|enable-all|status} ..." ;;
+          esac
+          X_EOF
+
+          cat > module/webroot/index.html <<'X_EOF'
+          <!DOCTYPE html><html lang="id"><head>
+          <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+          <title>APPSPOOF</title><link rel="stylesheet" href="style.css"></head><body>
+          <header class="topbar"><div class="brand">APPSPOOF</div>
+          <div class="status"><span id="stat-device" class="pill">device ?</span>
+          <span id="stat-hw" class="pill">hw ?</span>
+          <span id="stat-ks" class="pill">ks ?</span></div></header>
+          <nav class="tabs"><button class="tab active" data-tab="device">Device</button>
+          <button class="tab" data-tab="hw">CPU/GPU</button><button class="tab" data-tab="log">Log</button></nav>
+          <main>
+          <section id="tab-device" class="panel active">
+          <div class="card row-between"><div><div class="h1">Enable Spoofing</div>
+          <div class="muted" id="device-count">0 apps Spoofed</div></div>
+          <label class="switch"><input type="checkbox" id="device-enabled"><span class="slider"></span></label></div>
+          <div class="card"><div class="row gap"><input id="device-pkg" class="input grow" placeholder="com.example.app">
+          <button class="btn secondary" id="device-search">Cari</button></div>
+          <div id="device-applist" class="applist hidden"></div>
+          <div class="field"><label>Preset</label><select id="device-code" class="input"></select></div>
+          <div class="row gap"><button class="btn primary grow" id="device-add">Tambah/Ubah</button>
+          <button class="btn danger" id="device-clear">Clear all</button></div></div>
+          <div class="card"><div class="h2">App terkonfigurasi</div><div id="device-list" class="list"></div></div>
+          </section>
+          <section id="tab-hw" class="panel">
+          <div class="card row-between"><div><div class="h1">Hardware Spoofing</div>
+          <div class="muted" id="hw-count">0 configured</div></div>
+          <label class="switch"><input type="checkbox" id="hw-enabled"><span class="slider"></span></label></div>
+          <div class="card"><div class="row gap"><input id="hw-pkg" class="input grow" placeholder="com.example.app">
+          <button class="btn secondary" id="hw-search">Cari</button></div>
+          <div id="hw-applist" class="applist hidden"></div>
+          <div class="field"><label>GPU</label><select id="hw-gpu" class="input"></select></div>
+          <div class="field"><label>CPU</label><select id="hw-cpu" class="input"></select></div>
+          <div class="row gap"><button class="btn primary grow" id="hw-add">Tambah/Ubah</button>
+          <button class="btn danger" id="hw-clear">Clear all</button></div></div>
+          <div class="card"><div class="h2">Rules</div><div id="hw-list" class="list"></div></div>
+          </section>
+          <section id="tab-log" class="panel">
+          <div class="card"><div class="row gap"><select id="log-filter" class="input grow">
+          <option value="all">Semua</option><option value="device">[DEVICE]</option><option value="hw">[HW]</option></select>
+          <button class="btn secondary" id="log-refresh">Refresh</button></div>
+          <pre id="log-body" class="log">(memuat…)</pre></div>
+          </section>
+          </main>
+          <footer class="footbar"><button class="btn primary" id="apply">Apply</button>
+          <button class="btn secondary" id="reload">Reload</button></footer>
+          <div id="toast" class="toast hidden"></div>
+          <script src="presets.js"></script><script src="app.js"></script>
+          </body></html>
+          X_EOF
+
+          cat > module/webroot/style.css <<'X_EOF'
+          :root{--bg:#0f1216;--fg:#e8eaee;--muted:#8b93a1;--card:#161b22;--line:#232a33;--acc:#4f8cff;--ok:#2fb26b;--dgr:#e25555}
+          *{box-sizing:border-box}html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);
+          font:14px/1.45 system-ui,sans-serif;padding-bottom:72px}
+          .topbar{position:sticky;top:0;z-index:10;background:#0f1216ee;padding:12px 14px 8px;
+          display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line)}
+          .brand{font-weight:700}.status{display:flex;gap:6px}
+          .pill{font-size:11px;padding:3px 8px;border-radius:999px;background:#1f2530;color:var(--muted);border:1px solid var(--line)}
+          .pill.ok{color:var(--ok)}.pill.warn{color:#d8a13a}.pill.danger{color:var(--dgr)}
+          .tabs{display:flex;gap:6px;padding:10px 12px 0}
+          .tab{flex:1;background:#1a2029;color:var(--muted);border:1px solid var(--line);padding:8px;border-radius:999px;font:inherit;cursor:pointer}
+          .tab.active{background:var(--acc);color:#fff;border-color:transparent}
+          main{padding:8px 12px}.panel{display:none}.panel.active{display:block}
+          .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin:10px 0}
+          .row{display:flex}.row.gap{gap:8px}.row-between{display:flex;justify-content:space-between;align-items:center}
+          .grow{flex:1;min-width:0}.h1{font-size:15px;font-weight:600}.h2{font-size:13px;color:var(--muted);margin-bottom:8px}
+          .muted{color:var(--muted);font-size:12px;margin-top:2px}.hidden{display:none!important}
+          .field{margin-top:10px}.field>label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+          .input{width:100%;background:#10151c;color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:9px 10px;font:inherit}
+          .btn{font:inherit;cursor:pointer;padding:9px 12px;border-radius:10px;border:1px solid var(--line);background:#1a2029;color:var(--fg);white-space:nowrap}
+          .btn.primary{background:var(--acc);color:#fff;border-color:transparent}
+          .btn.danger{background:#341b1b;color:#ffb4b4;border-color:#4d1d1d}
+          .list{display:flex;flex-direction:column;gap:8px}
+          .item{border:1px solid var(--line);border-radius:10px;padding:10px;background:#131922}
+          .item .line1{display:flex;justify-content:space-between;gap:8px}
+          .item .pkg{font-size:13px;font-weight:600;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+          .item .tag{font-size:11px;padding:2px 8px;border-radius:999px;background:#1e2836;color:#9fc1ff;border:1px solid #22304a;
+          max-width:45%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+          .item .line2{display:flex;justify-content:space-between;gap:6px;margin-top:6px}
+          .item .sub{font-size:12px;color:var(--muted);flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+          .applist{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:10px;margin-top:8px;background:#0c1016}
+          .applist .app{padding:8px 10px;cursor:pointer;border-bottom:1px solid #101722;font-size:12px}
+          .applist .app:hover{background:#121a26}
+          .switch{position:relative;width:46px;height:26px;display:inline-block}
+          .switch input{display:none}.slider{position:absolute;inset:0;background:#2a3340;border-radius:999px;transition:.15s}
+          .slider::before{content:"";position:absolute;width:20px;height:20px;left:3px;top:3px;background:#e8eaee;border-radius:50%;transition:.15s}
+          .switch input:checked+.slider{background:var(--ok)}.switch input:checked+.slider::before{transform:translateX(20px)}
+          .footbar{position:fixed;left:0;right:0;bottom:0;padding:10px 12px;background:#0f1216ee;border-top:1px solid var(--line);display:flex;gap:8px}
+          .footbar .btn{flex:1}
+          .log{margin:0;padding:10px;background:#0b0f14;border:1px solid var(--line);border-radius:10px;
+          font:12px/1.45 ui-monospace,monospace;white-space:pre-wrap;word-break:break-all;max-height:60vh;overflow:auto}
+          .toast{position:fixed;left:50%;bottom:84px;transform:translateX(-50%);background:#1c2430;color:#fff;
+          padding:10px 14px;border-radius:10px;border:1px solid var(--line);z-index:20;max-width:90vw;font-size:13px}
+          .toast.err{background:#3a1e1e;border-color:#5a2a2a}
+          X_EOF
+
+          cat > module/webroot/app.js <<'X_EOF'
+          'use strict';
+          (function(){
+          var KS=(typeof ksu!=='undefined')?ksu:null;
+          var CTL='/data/adb/modules/appspoof_zygisk/bin/appspoofctl.sh';
+          function $(id){return document.getElementById(id)}
+          function toast(m,e){var t=$('toast');if(!t)return;t.textContent=String(m).slice(0,220);
+            t.classList.remove('hidden');t.classList.toggle('err',!!e);
+            clearTimeout(toast._t);toast._t=setTimeout(function(){t.classList.add('hidden')},3500)}
+          function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+          function kx(cmd,to){return new Promise(function(res){
+            var d=false;function fin(er,so,se){if(d)return;d=true;res({errno:Number(er)||0,stdout:so||'',stderr:se||''})}
+            setTimeout(function(){fin(-2,'','timeout')},to||12000);
+            if(!KS||typeof KS.exec!=='function'){fin(-1,'','no ksu');return}
+            try{var r=KS.exec(cmd,function(a,b,c){fin(a,b,c)});
+              if(r&&typeof r.then==='function'){r.then(function(x){
+                if(x&&typeof x==='object')fin(x.errno,x.stdout,x.stderr);
+                else if(typeof x==='string')fin(0,x,'');else fin(0,'','');
+              }).catch(function(e){fin(-3,'',String(e))})}
+              else if(typeof r==='string')fin(0,r,'');
+            }catch(e){try{var r2=KS.exec(cmd,{},function(a,b,c){fin(a,b,c)});
+              if(r2&&r2.then)r2.then(function(x){if(x&&typeof x==='object')fin(x.errno,x.stdout,x.stderr)});
+              }catch(e2){fin(-4,'',String(e)+'/'+String(e2))}}
+          })}
+          function sh(c,to){return kx('su -c '+JSON.stringify(c),to||12000)}
+          function ctl(a){return sh('sh '+CTL+' '+a,15000)}
+          var PR=window.APPSPOOF_PRESETS||{},GP=window.APPSPOOF_GPU||{},CP=window.APPSPOOF_CPU||{};
+          var st={device:{enabled:true,rules:[]},hw:{enabled:true,rules:[]},apps:null};
+          function loadApps(){if(st.apps)return Promise.resolve(st.apps);
+            return sh('pm list packages -3 2>/dev/null',10000).then(function(r){
+              var a=parse(r.stdout);if(a.length)return st.apps=a;
+              return sh('pm list packages',10000).then(function(r2){return st.apps=parse(r2.stdout)})})}
+          function parse(t){var l=(t||'').split(/\r?\n/),o=[];for(var i=0;i<l.length;i++){var s=l[i].trim();
+            if(!s)continue;if(s.indexOf('package:')===0)s=s.slice(8);if(s&&o.indexOf(s)<0)o.push(s)}o.sort();return o}
+          function stat(){return ctl('status').then(function(r){
+            var kv={};(r.stdout||'').split(/\r?\n/).forEach(function(l){var m=l.match(/^([a-z\-_]+)=(.*)$/);if(m)kv[m[1]]=m[2]});
+            st.device.enabled=kv.device_enabled==='1';st.hw.enabled=kv.hw_enabled==='1';
+            if($('device-enabled'))$('device-enabled').checked=st.device.enabled;
+            if($('hw-enabled'))$('hw-enabled').checked=st.hw.enabled;
+            var ksel=$('stat-ks');if(ksel){var k=kv['kill-switch']||'';
+              ksel.textContent=k.indexOf('AKTIF')>=0?'ks ON':'ks off';ksel.className='pill '+(k.indexOf('AKTIF')>=0?'danger':'ok')}
+            var de=$('stat-device');if(de){de.textContent='device '+(kv.device_rules||'0');de.className='pill '+(st.device.enabled?'ok':'')}
+            var he=$('stat-hw');if(he){he.textContent='hw '+(kv.hw_rules||'0');he.className='pill '+(st.hw.enabled?'ok':'')}
+          })}
+          function loadD(){return ctl('device list').then(function(r){
+            var o=[];(r.stdout||'').split(/\r?\n/).forEach(function(l){if(!l||l[0]==='#')return;
+              var p=l.split('\t');if(p.length>=2&&p[0])o.push({pkg:p[0],code:p[1]||''})});
+            st.device.rules=o;renderD();if($('device-count'))$('device-count').textContent=o.length+' apps Spoofed'})}
+          function loadH(){return ctl('hw list').then(function(r){
+            var o=[];(r.stdout||'').split(/\r?\n/).forEach(function(l){if(!l||l[0]==='#')return;
+              var p=l.split('\t');if(p.length>=1&&p[0])o.push({pkg:p[0],gpu:p[1]||'',cpu:p[2]||''})});
+            st.hw.rules=o;renderH();if($('hw-count'))$('hw-count').textContent=o.length+' configured'})}
+          function lbl(c){return (PR[c]&&PR[c].label)||c||'?'}
+          function renderD(){var b=$('device-list');if(!b)return;b.innerHTML='';
+            if(!st.device.rules.length){b.innerHTML='<div class="muted">Belum ada.</div>';return}
+            st.device.rules.forEach(function(r){var d=document.createElement('div');d.className='item';
+              d.innerHTML='<div class="line1"><div class="pkg">'+esc(r.pkg)+'</div><div class="tag">'+esc(lbl(r.code))+'</div></div>'+
+                '<div class="line2"><div class="sub">code: '+esc(r.code)+'</div>'+
+                '<button class="btn secondary" data-a="ed" data-p="'+esc(r.pkg)+'">Edit</button>'+
+                '<button class="btn danger" data-a="dd" data-p="'+esc(r.pkg)+'">Hapus</button></div>';b.appendChild(d)})}
+          function renderH(){var b=$('hw-list');if(!b)return;b.innerHTML='';
+            if(!st.hw.rules.length){b.innerHTML='<div class="muted">Belum ada.</div>';return}
+            st.hw.rules.forEach(function(r){var g=r.gpu?(GP[r.gpu]||r.gpu):'None';var c=r.cpu?(CP[r.cpu]||r.cpu):'None';
+              var d=document.createElement('div');d.className='item';
+              d.innerHTML='<div class="line1"><div class="pkg">'+esc(r.pkg)+'</div><div class="tag">'+esc(g)+'</div></div>'+
+                '<div class="line2"><div class="sub">CPU: '+esc(c)+'</div>'+
+                '<button class="btn secondary" data-a="eh" data-p="'+esc(r.pkg)+'">Edit</button>'+
+                '<button class="btn danger" data-a="dh" data-p="'+esc(r.pkg)+'">Hapus</button></div>';b.appendChild(d)})}
+          function fill(){var s=$('device-code');if(s){s.innerHTML='';
+              Object.keys(PR).sort(function(a,b){return lbl(a).localeCompare(lbl(b))}).forEach(function(k){
+                var o=document.createElement('option');o.value=k;o.textContent=lbl(k);s.appendChild(o)})}
+            var g=$('hw-gpu');if(g){g.innerHTML='<option value="">None</option>';
+              Object.keys(GP).sort().forEach(function(k){var o=document.createElement('option');o.value=k;o.textContent=GP[k];g.appendChild(o)})}
+            var c=$('hw-cpu');if(c){c.innerHTML='<option value="">None</option>';
+              Object.keys(CP).sort().forEach(function(k){var o=document.createElement('option');o.value=k;o.textContent=CP[k];c.appendChild(o)})}}
+          function pick(box,apps,q,cb){var f=q?apps.filter(function(p){return p.toLowerCase().indexOf(q)>=0}):apps;
+            f=f.slice(0,200);box.innerHTML='';if(!f.length){box.innerHTML='<div class="app">Tidak ada ('+apps.length+').</div>'}
+            else f.forEach(function(p){var d=document.createElement('div');d.className='app';d.textContent=p;
+              d.onclick=function(){cb(p);box.classList.add('hidden')};box.appendChild(d)});
+            box.classList.remove('hidden')}
+          function onSD(){var q=($('device-pkg').value||'').trim().toLowerCase();
+            loadApps().then(function(a){pick($('device-applist'),a,q,function(p){$('device-pkg').value=p})})}
+          function onSH(){var q=($('hw-pkg').value||'').trim().toLowerCase();
+            loadApps().then(function(a){pick($('hw-applist'),a,q,function(p){$('hw-pkg').value=p})})}
+          function onDA(){var p=($('device-pkg').value||'').trim();var c=$('device-code').value;
+            if(!p||!c){toast('Isi pkg & preset',true);return}
+            ctl('device set '+p+' '+c).then(function(r){
+              toast(r.errno===0?'OK: '+p+' -> '+lbl(c):'Gagal: '+(r.stderr||r.stdout||'').slice(0,100),r.errno!==0);
+              return loadD().then(stat)})}
+          function onHA(){var p=($('hw-pkg').value||'').trim();var g=$('hw-gpu').value;var c=$('hw-cpu').value;
+            if(!p){toast('Isi pkg',true);return}if(!g&&!c){toast('Pilih GPU/CPU',true);return}
+            ctl('hw set '+p+" '"+g+"' '"+c+"'").then(function(r){
+              toast(r.errno===0?'OK: '+p:'Gagal: '+(r.stderr||r.stdout||'').slice(0,100),r.errno!==0);
+              return loadH().then(stat)})}
+          function onDC(){if(!confirm('Clear device?'))return;ctl('device clear').then(function(){return loadD().then(stat)})}
+          function onHC(){if(!confirm('Clear HW?'))return;ctl('hw clear').then(function(){return loadH().then(stat)})}
+          function onDT(v){ctl(v?'device enable':'device disable').then(stat)}
+          function onHT(v){ctl(v?'hw enable':'hw disable').then(stat)}
+          function onLog(){var f=$('log-filter').value;ctl('log '+f+' 300').then(function(r){$('log-body').textContent=r.stdout||'(kosong)'})}
+          function onApply(){loadD().then(loadH).then(stat).then(function(){toast('Apply OK')})}
+          function tabs(){document.querySelectorAll('.tab').forEach(function(t){t.onclick=function(){
+            var n=t.dataset.tab;document.querySelectorAll('.tab').forEach(function(x){x.classList.toggle('active',x===t)});
+            document.querySelectorAll('.panel').forEach(function(p){p.classList.toggle('active',p.id==='tab-'+n)});
+            if(n==='log')onLog()}})}
+          function bind(){
+            var x;
+            if(x=$('device-enabled'))x.onchange=function(e){onDT(e.target.checked)};
+            if(x=$('hw-enabled'))x.onchange=function(e){onHT(e.target.checked)};
+            if(x=$('device-search'))x.onclick=onSD;
+            if(x=$('device-add'))x.onclick=onDA;
+            if(x=$('device-clear'))x.onclick=onDC;
+            if(x=$('hw-search'))x.onclick=onSH;
+            if(x=$('hw-add'))x.onclick=onHA;
+            if(x=$('hw-clear'))x.onclick=onHC;
+            if(x=$('log-refresh'))x.onclick=onLog;
+            if(x=$('apply'))x.onclick=onApply;
+            if(x=$('reload'))x.onclick=function(){location.reload()};
+            document.addEventListener('click',function(e){var t=e.target;
+              if(!t||t.tagName!=='BUTTON')return;var a=t.dataset.a,p=t.dataset.p;if(!a||!p)return;
+              if(a==='ed'){var r=st.device.rules.filter(function(x){return x.pkg===p})[0];
+                if(r){$('device-pkg').value=r.pkg;var s=$('device-code');
+                  for(var i=0;i<s.options.length;i++)if(s.options[i].value===r.code){s.selectedIndex=i;break}}
+                window.scrollTo({top:0,behavior:'smooth'})}
+              else if(a==='dd'){if(!confirm('Hapus '+p+'?'))return;ctl('device remove '+p).then(function(){return loadD().then(stat)})}
+              else if(a==='eh'){var r2=st.hw.rules.filter(function(x){return x.pkg===p})[0];
+                if(r2){$('hw-pkg').value=r2.pkg;$('hw-gpu').value=r2.gpu||'';$('hw-cpu').value=r2.cpu||''}
+                window.scrollTo({top:0,behavior:'smooth'})}
+              else if(a==='dh'){if(!confirm('Hapus '+p+'?'))return;ctl('hw remove '+p).then(function(){return loadH().then(stat)})}})}
+          function boot(){tabs();bind();fill();
+            if(!KS)toast('ksu tidak terdeteksi',true);
+            loadD().then(loadH).then(stat).catch(function(e){toast('Init: '+e,true)})}
+          if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',boot);else boot()
+          })();
+          X_EOF
+
+          chmod +x module/customize.sh module/uninstall.sh module/bin/appspoofctl.sh
+
+      - name: Package module zip
+        run: |
+          set -e
+          STAGE=build/stage
+          rm -rf "$STAGE"; mkdir -p "$STAGE/zygisk" "$STAGE/bin" "$STAGE/webroot"
+          cp module/module.prop  "$STAGE/"
+          cp module/customize.sh "$STAGE/"
+          cp module/uninstall.sh "$STAGE/"
+          cp module/bin/appspoofctl.sh "$STAGE/bin/"
+          cp src/presets.tsv "$STAGE/bin/presets.tsv"
+          cp src/hw_models.tsv "$STAGE/bin/hw_models.tsv"
+          cp module/webroot/index.html "$STAGE/webroot/"
+          cp module/webroot/style.css  "$STAGE/webroot/"
+          cp module/webroot/app.js     "$STAGE/webroot/"
+          cp module/webroot/presets.js "$STAGE/webroot/"
+          cp build/libzygisk.so "$STAGE/zygisk/arm64-v8a.so"
+          chmod 0755 "$STAGE/bin/appspoofctl.sh" "$STAGE/customize.sh" "$STAGE/uninstall.sh"
+          chmod 0644 "$STAGE/zygisk/arm64-v8a.so"
+          echo "=== struktur ==="
+          find "$STAGE" -type f | sort
+          echo ""
+          echo "=== .so info ==="
+          readelf -d "$STAGE/zygisk/arm64-v8a.so" | grep -E 'NEEDED|RPATH|RUNPATH' || true
+          nm -D "$STAGE/zygisk/arm64-v8a.so" | grep -E 'zygisk_(module|companion)_entry'
+          echo ""
+          STAMP=$(date -u +%Y%m%d-%H%M%S)
+          ZIP="appspoof-module-$STAMP.zip"
+          ( cd "$STAGE" && zip -r -q "../../$ZIP" . -x '.*' )
+          ls -la "$ZIP"
+          sha256sum "$ZIP"
+          echo "ZIP_NAME=$ZIP" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: appspoof-module
+          path: appspoof-module-*.zip
+          if-no-files-found: error
