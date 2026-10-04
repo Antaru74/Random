@@ -986,6 +986,7 @@ jobs:
           echo "== [4/4] link =="
           "$CXX" -shared -static-libstdc++ -Wl,--no-undefined \
             -Wl,-z,max-page-size=16384 -Wl,--hash-style=sysv \
+            -llog -lc -ldl -lm \
             -o build/libzygisk.so build/mod/*.o build/sh/*.o
 
           echo "--- pre-strip ---"
