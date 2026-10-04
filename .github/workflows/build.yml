@@ -26,7 +26,7 @@ jobs:
       - name: Fetch external deps
         run: |
           set -e
-          mkdir -p src/third_party src/hw_templates docs/ref module/bin module/webroot
+          mkdir -p src/third_party docs/ref module/bin module/webroot
 
           curl -fsSL -o src/third_party/zygisk.hpp \
             "https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp"
@@ -34,14 +34,12 @@ jobs:
           FW=54dcd6491b9f1c8612ae037ce94a0c6b22348bf4
           BASE="https://raw.githubusercontent.com/ronardnx/penguin_frameworks_base/$FW/core/java/com/android/internal/util/custom"
           curl -fsSL -o docs/ref/PerAppsPropsUtils.java     "$BASE/PerAppsPropsUtils.java"
-          curl -fsSL -o docs/ref/AdvancedAppSpoofUtils.java "$BASE/AdvancedAppSpoofUtils.java"
           SET="https://raw.githubusercontent.com/Project-PenguinOS/packages_apps_Settings/41697be08ff1bf2760f6a7ec318db61e9adbe9bb"
           curl -fsSL -o docs/ref/custom_arrays.xml "$SET/res/values/custom_arrays.xml"
 
           echo "deps OK"
-          grep -n 'ZYGISK_API_VERSION' src/third_party/zygisk.hpp | head -n 3
 
-      - name: Write source files (C + headers)
+      - name: Write source files
         run: |
           set -e
 
@@ -55,17 +53,10 @@ jobs:
           #define APPSPOOF_PKG_MAX    256
           #define APPSPOOF_CODE_MAX   64
           #define APPSPOOF_DEVICE_MAX 512
-          struct appspoof_device_rule {
-              char pkg[APPSPOOF_PKG_MAX];
-              char code[APPSPOOF_CODE_MAX];
-          };
-          struct appspoof_device_rules {
-              struct appspoof_device_rule items[APPSPOOF_DEVICE_MAX];
-              int count;
-          };
+          struct appspoof_device_rule { char pkg[APPSPOOF_PKG_MAX]; char code[APPSPOOF_CODE_MAX]; };
+          struct appspoof_device_rules { struct appspoof_device_rule items[APPSPOOF_DEVICE_MAX]; int count; };
           int appspoof_device_rules_load(const char *path, struct appspoof_device_rules *out);
-          const struct appspoof_device_rule *
-          appspoof_device_rules_find(const struct appspoof_device_rules *rules, const char *pkg);
+          const struct appspoof_device_rule *appspoof_device_rules_find(const struct appspoof_device_rules *rules, const char *pkg);
           #ifdef __cplusplus
           }
           #endif
@@ -76,118 +67,31 @@ jobs:
           #include "device_rules.h"
           #include <stdio.h>
           #include <string.h>
-          static int copy_field(char *dst, size_t cap, const char *src) {
-              size_t len = strlen(src);
-              if (len >= cap) return -1;
-              memcpy(dst, src, len); dst[len] = '\0';
-              return 0;
-          }
+          static int cf(char *d, size_t c, const char *s) { size_t n=strlen(s); if(n>=c)return -1; memcpy(d,s,n); d[n]='\0'; return 0; }
           int appspoof_device_rules_load(const char *path, struct appspoof_device_rules *out) {
-              if (!path || !out) return -1;
-              out->count = 0;
-              FILE *f = fopen(path, "r");
-              if (!f) return 0;
+              if (!path || !out) return -1; out->count = 0;
+              FILE *f = fopen(path, "r"); if (!f) return 0;
               char line[1024]; int errors = 0;
               while (fgets(line, sizeof(line), f)) {
                   size_t n = strlen(line);
-                  int complete = (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r')) || feof(f);
-                  if (!complete) { int ch; while ((ch = fgetc(f)) != EOF && ch != '\n') {} errors++; continue; }
-                  while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = '\0';
-                  if (n == 0 || line[0] == '#') continue;
-                  char *tab = strchr(line, '\t');
-                  if (!tab) { errors++; continue; }
-                  *tab = '\0';
-                  char *pkg = line; char *code = tab + 1;
-                  if (strchr(code, '\t')) { errors++; continue; }
-                  if (pkg[0] == '\0' || code[0] == '\0') { errors++; continue; }
+                  int ok = (n>0 && (line[n-1]=='\n'||line[n-1]=='\r')) || feof(f);
+                  if (!ok) { int ch; while ((ch = fgetc(f)) != EOF && ch != '\n') {} errors++; continue; }
+                  while (n>0 && (line[n-1]=='\n'||line[n-1]=='\r')) line[--n]='\0';
+                  if (n==0 || line[0]=='#') continue;
+                  char *t = strchr(line, '\t'); if (!t) { errors++; continue; }
+                  *t='\0';
+                  char *p = line, *c = t+1;
+                  if (strchr(c, '\t') || p[0]=='\0' || c[0]=='\0') { errors++; continue; }
                   if (out->count >= APPSPOOF_DEVICE_MAX) { errors++; break; }
                   struct appspoof_device_rule *r = &out->items[out->count];
-                  if (copy_field(r->pkg,  sizeof(r->pkg),  pkg)  < 0) { errors++; continue; }
-                  if (copy_field(r->code, sizeof(r->code), code) < 0) { errors++; continue; }
+                  if (cf(r->pkg, sizeof(r->pkg), p)<0) { errors++; continue; }
+                  if (cf(r->code, sizeof(r->code), c)<0) { errors++; continue; }
                   out->count++;
               }
               fclose(f);
               return errors ? -errors : 0;
           }
-          const struct appspoof_device_rule *
-          appspoof_device_rules_find(const struct appspoof_device_rules *rules, const char *pkg) {
-              if (!rules || !pkg) return 0;
-              for (int i = 0; i < rules->count; ++i)
-                  if (strcmp(rules->items[i].pkg, pkg) == 0) return &rules->items[i];
-              return 0;
-          }
-          X_EOF
-
-          cat > src/hw_rules.h <<'X_EOF'
-          #ifndef APPSPOOF_HW_RULES_H
-          #define APPSPOOF_HW_RULES_H
-          #include <stddef.h>
-          #ifdef __cplusplus
-          extern "C" {
-          #endif
-          #define APPSPOOF_HW_PKG_MAX  256
-          #define APPSPOOF_HW_KEY_MAX  64
-          #define APPSPOOF_HW_MAX      512
-          struct appspoof_hw_rule {
-              char pkg[APPSPOOF_HW_PKG_MAX];
-              char gpu[APPSPOOF_HW_KEY_MAX];
-              char cpu[APPSPOOF_HW_KEY_MAX];
-          };
-          struct appspoof_hw_rules {
-              struct appspoof_hw_rule items[APPSPOOF_HW_MAX];
-              int count;
-          };
-          int appspoof_hw_rules_load(const char *path, struct appspoof_hw_rules *out);
-          const struct appspoof_hw_rule *
-          appspoof_hw_rules_find(const struct appspoof_hw_rules *rules, const char *pkg);
-          #ifdef __cplusplus
-          }
-          #endif
-          #endif
-          X_EOF
-
-          cat > src/hw_rules.c <<'X_EOF'
-          #include "hw_rules.h"
-          #include <stdio.h>
-          #include <string.h>
-          static int copy_field(char *dst, size_t cap, const char *src) {
-              size_t len = strlen(src);
-              if (len >= cap) return -1;
-              memcpy(dst, src, len); dst[len] = '\0';
-              return 0;
-          }
-          int appspoof_hw_rules_load(const char *path, struct appspoof_hw_rules *out) {
-              if (!path || !out) return -1;
-              out->count = 0;
-              FILE *f = fopen(path, "r");
-              if (!f) return 0;
-              char line[1024]; int errors = 0;
-              while (fgets(line, sizeof(line), f)) {
-                  size_t n = strlen(line);
-                  int complete = (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r')) || feof(f);
-                  if (!complete) { int ch; while ((ch = fgetc(f)) != EOF && ch != '\n') {} errors++; continue; }
-                  while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = '\0';
-                  if (n == 0 || line[0] == '#') continue;
-                  char *t1 = strchr(line, '\t'); if (!t1) { errors++; continue; }
-                  *t1 = '\0';
-                  char *pkg = line; char *rest = t1 + 1;
-                  char *t2 = strchr(rest, '\t'); if (!t2) { errors++; continue; }
-                  *t2 = '\0';
-                  char *gpu = rest; char *cpu = t2 + 1;
-                  if (strchr(cpu, '\t')) { errors++; continue; }
-                  if (pkg[0] == '\0') { errors++; continue; }
-                  if (out->count >= APPSPOOF_HW_MAX) { errors++; break; }
-                  struct appspoof_hw_rule *r = &out->items[out->count];
-                  if (copy_field(r->pkg, sizeof(r->pkg), pkg) < 0) { errors++; continue; }
-                  if (copy_field(r->gpu, sizeof(r->gpu), gpu) < 0) { errors++; continue; }
-                  if (copy_field(r->cpu, sizeof(r->cpu), cpu) < 0) { errors++; continue; }
-                  out->count++;
-              }
-              fclose(f);
-              return errors ? -errors : 0;
-          }
-          const struct appspoof_hw_rule *
-          appspoof_hw_rules_find(const struct appspoof_hw_rules *rules, const char *pkg) {
+          const struct appspoof_device_rule *appspoof_device_rules_find(const struct appspoof_device_rules *rules, const char *pkg) {
               if (!rules || !pkg) return 0;
               for (int i = 0; i < rules->count; ++i)
                   if (strcmp(rules->items[i].pkg, pkg) == 0) return &rules->items[i];
@@ -209,20 +113,6 @@ jobs:
           #endif
           X_EOF
 
-          cat > src/hw_hooks.h <<'X_EOF'
-          #ifndef APPSPOOF_HW_HOOKS_H
-          #define APPSPOOF_HW_HOOKS_H
-          #include <jni.h>
-          #ifdef __cplusplus
-          extern "C" {
-          #endif
-          int appspoof_hw_apply(JNIEnv *env, const char *gpu_key, const char *cpu_key);
-          #ifdef __cplusplus
-          }
-          #endif
-          #endif
-          X_EOF
-
           cat > src/zygisk_compat.h <<'X_EOF'
           #ifndef APPSPOOF_ZYGISK_COMPAT_H
           #define APPSPOOF_ZYGISK_COMPAT_H
@@ -230,12 +120,6 @@ jobs:
           #include <zygisk.hpp>
           #endif
           X_EOF
-
-          echo "C sources OK"
-
-      - name: Write source files (C++)
-        run: |
-          set -e
 
           cat > src/build_spoof.cpp <<'X_EOF'
           #include "build_spoof.h"
@@ -251,8 +135,7 @@ jobs:
               return 0;
           }
 
-          static int set_static_string(JNIEnv *env, jclass cls,
-                                       const char *field, const char *value) {
+          static int sss(JNIEnv *env, jclass cls, const char *field, const char *value) {
               if (!value || value[0] == '\0') return 0;
               jfieldID fid = env->GetStaticFieldID(cls, field, "Ljava/lang/String;");
               if (!fid) { if (env->ExceptionCheck()) env->ExceptionClear(); return -1; }
@@ -271,35 +154,17 @@ jobs:
               jclass cls = env->FindClass("android/os/Build");
               if (!cls) { if (env->ExceptionCheck()) env->ExceptionClear(); return -102; }
               int applied = 0;
-              int rc;
-              rc = set_static_string(env, cls, "BRAND",        p->brand);         if (rc == 1) applied++;
-              rc = set_static_string(env, cls, "MANUFACTURER", p->manufacturer);  if (rc == 1) applied++;
-              rc = set_static_string(env, cls, "DEVICE",       p->device);        if (rc == 1) applied++;
-              rc = set_static_string(env, cls, "MODEL",        p->model);         if (rc == 1) applied++;
-              rc = set_static_string(env, cls, "FINGERPRINT",  p->fingerprint);   if (rc == 1) applied++;
-              rc = set_static_string(env, cls, "PRODUCT",      p->product);       if (rc == 1) applied++;
+              if (sss(env, cls, "BRAND",        p->brand)        == 1) applied++;
+              if (sss(env, cls, "MANUFACTURER", p->manufacturer) == 1) applied++;
+              if (sss(env, cls, "DEVICE",       p->device)       == 1) applied++;
+              if (sss(env, cls, "MODEL",        p->model)        == 1) applied++;
+              if (sss(env, cls, "FINGERPRINT",  p->fingerprint)  == 1) applied++;
+              if (sss(env, cls, "PRODUCT",      p->product)      == 1) applied++;
               env->DeleteLocalRef(cls);
               return applied;
           }
 
           } /* extern "C" */
-          X_EOF
-
-          cat > src/hw_hooks.cpp <<'X_EOF'
-          #include "hw_hooks.h"
-          #include <string.h>
-          #include <stdlib.h>
-          #include <android/log.h>
-
-          #define TAG "APPSPOOF"
-          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
-
-          extern "C" {
-          int appspoof_hw_apply(JNIEnv *env, const char *gpu_key, const char *cpu_key) {
-              (void)env; (void)gpu_key; (void)cpu_key;
-              return 0;
-          }
-          }
           X_EOF
 
           cat > src/zygisk_module.cpp <<'X_EOF'
@@ -325,8 +190,7 @@ jobs:
                   L(ANDROID_LOG_INFO, "BOOT", "onLoad zygisk API=%d", ZYGISK_API_VERSION);
               }
               void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
-                  g_has_device = 0;
-                  g_device_code[0] = '\0';
+                  g_has_device = 0; g_device_code[0] = '\0';
                   if (!args || !args->nice_name) { skip(); return; }
                   const char *nice = env->GetStringUTFChars(args->nice_name, nullptr);
                   if (!nice) { if (env->ExceptionCheck()) env->ExceptionClear(); skip(); return; }
@@ -342,7 +206,6 @@ jobs:
                       strncpy(g_device_code, "RM11P", sizeof(g_device_code) - 1);
                       L(ANDROID_LOG_INFO, "PRE", "TARGET pkg=%s code=RM11P", pkg);
                   } else {
-                      L(ANDROID_LOG_INFO, "PRE", "pkg=%s bukan target", pkg);
                       skip();
                       return;
                   }
@@ -364,9 +227,9 @@ jobs:
           REGISTER_ZYGISK_MODULE(AppSpoofModule)
           X_EOF
 
-          echo "C++ sources OK"
+          echo "sources OK"
 
-      - name: Write Python extractors
+      - name: Write Python extractor
         run: |
           set -e
           cat > tools_extract_presets.py <<'X_EOF'
@@ -446,9 +309,7 @@ jobs:
           cat > tools_gen_headers.py <<'X_EOF'
           #!/usr/bin/env python3
           import pathlib
-
           def esc(s): return s.replace("\\","\\\\").replace('"','\\"')
-
           def read_tsv(p, ncol):
               rows = []
               for ln in p.read_text(encoding="utf-8").splitlines():
@@ -458,9 +319,7 @@ jobs:
                   if len(parts) != ncol: continue
                   rows.append(parts)
               return rows
-
           prows = read_tsv(pathlib.Path("src/presets.tsv"), 9)
-
           with open("src/presets_gen.h", "w") as f:
               f.write("#pragma once\nstruct appspoof_preset { const char *code,*label,*brand,*manufacturer,*device,*model,*fingerprint,*product; };\n")
               f.write(f"static const struct appspoof_preset appspoof_presets[{max(len(prows),1)}] = {{\n")
@@ -469,19 +328,17 @@ jobs:
               if not prows: f.write('  { "","","","","","","","" },\n')
               f.write("};\n")
               f.write(f"static const int appspoof_presets_count = {len(prows)};\n")
-
           print(f"presets={len(prows)}")
           X_EOF
 
           python3 tools_extract_presets.py
           python3 tools_gen_headers.py
 
-      - name: Compile with Android NDK r27 (16KB align untuk Android 15)
+      - name: Compile with Android NDK (static libc++, 16KB align)
         run: |
           set -e
           NDK="${ANDROID_NDK_HOME}"
           TCBIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           CC="$TCBIN/aarch64-linux-android24-clang"
           CXX="$TCBIN/aarch64-linux-android24-clang++"
           STRIP="$TCBIN/llvm-strip"
@@ -493,19 +350,20 @@ jobs:
           mkdir -p build/mod
 
           echo "== compile module .c =="
-          for f in device_rules hw_rules; do
+          for f in device_rules; do
             "$CC" -std=c11 -O2 -fPIC -fvisibility=hidden -Wno-everything $EXTRA $INC_MOD -c "src/$f.c" -o "build/mod/$f.o"
           done
 
           echo "== compile module .cpp =="
-          for f in build_spoof hw_hooks zygisk_module; do
+          for f in build_spoof zygisk_module; do
             "$CXX" -std=c++17 -O2 -fPIC -fvisibility=hidden \
               -fno-exceptions -fno-rtti \
               -Wno-everything $EXTRA $INC_MOD -c "src/$f.cpp" -o "build/mod/$f.o"
           done
 
-          echo "== link (16KB align + nopack-relative-relocs + no-undefined) =="
+          echo "== link (static libc++, 16KB align, nopack-relative-relocs) =="
           "$CXX" -shared \
+            -static-libstdc++ \
             -Wl,--gc-sections -Wl,--exclude-libs,ALL \
             -Wl,-z,max-page-size=16384 \
             -Wl,-z,nopack-relative-relocs \
@@ -515,30 +373,26 @@ jobs:
           echo "--- readelf -lW (LOAD alignment) ---"
           readelf -lW build/libzygisk.so | grep LOAD || true
 
-          echo "--- readelf -d (NEEDED/dynamic) ---"
+          echo "--- readelf -d (NEEDED) ---"
           readelf -d build/libzygisk.so | grep -E 'NEEDED|RPATH|RUNPATH|RELR' || true
 
-          echo "== sanity: align harus 0x4000 =="
+          echo "== sanity: align 16KB =="
           ALIGN=$(readelf -lW build/libzygisk.so | grep LOAD | head -n 1 | awk '{print $NF}')
-          echo "align=$ALIGN"
-          if [ "$ALIGN" != "0x4000" ]; then
-            echo "FAIL: align bukan 0x4000 (16KB)"
-            exit 1
+          [ "$ALIGN" = "0x4000" ] && echo "OK align" || { echo "FAIL align=$ALIGN"; exit 1; }
+
+          echo "== sanity: tidak ada libc++_shared =="
+          if readelf -d build/libzygisk.so | grep -q 'libc++_shared'; then
+            echo "FAIL: libc++_shared masih NEEDED"; exit 1
           fi
-          echo "OK: 16KB align"
+          echo "OK: no libc++_shared"
 
           echo "== sanity: entry point =="
-          nm -D build/libzygisk.so | grep -E 'zygisk_module_entry' || { echo "FAIL: entry hilang"; exit 1; }
+          nm -D build/libzygisk.so | grep -E 'zygisk_module_entry' || { echo "FAIL entry"; exit 1; }
 
           echo "== strip =="
           "$STRIP" --strip-debug build/libzygisk.so
           ls -la build/libzygisk.so
-
-          echo "== bundle libc++_shared =="
-          cp "$SYSROOT/usr/lib/aarch64-linux-android/libc++_shared.so" build/libc++_shared.so
-          "$STRIP" --strip-debug build/libc++_shared.so
-          echo "--- libc++_shared align ---"
-          readelf -lW build/libc++_shared.so | grep LOAD | head -n 3 || true
+          readelf -d build/libzygisk.so | grep NEEDED
 
       - name: Write module files
         run: |
@@ -546,19 +400,19 @@ jobs:
           cat > module/module.prop <<'X_EOF'
           id=appspoof_zygisk
           name=AppSpoof
-          version=v1.0.0-and15
+          version=v1.0.0-static
           versionCode=1
           author=APPSPOOF
-          description=Zygisk module for Android 15 — 16KB aligned, hardcoded test.
+          description=Zygisk module static libc++ — 16KB aligned.
           X_EOF
 
           cat > module/customize.sh <<'X_EOF'
           #!/system/bin/sh
           SKIPUNZIP=0
-          ui_print "- APPSPOOF and15: customize"
+          ui_print "- APPSPOOF static: customize"
           set_perm_recursive "$MODPATH" 0 0 0755 0644
           [ -d "$MODPATH/zygisk" ] && set_perm_recursive "$MODPATH/zygisk" 0 0 0755 0644
-          ui_print "- APPSPOOF and15: done"
+          ui_print "- APPSPOOF static: done"
           X_EOF
 
           cat > module/uninstall.sh <<'X_EOF'
@@ -577,16 +431,15 @@ jobs:
           cp module/module.prop  "$STAGE/"
           cp module/customize.sh "$STAGE/"
           cp module/uninstall.sh "$STAGE/"
-          cp build/libzygisk.so     "$STAGE/zygisk/arm64-v8a.so"
-          cp build/libc++_shared.so "$STAGE/zygisk/libc++_shared.so"
+          cp build/libzygisk.so "$STAGE/zygisk/arm64-v8a.so"
           chmod 0755 "$STAGE/customize.sh" "$STAGE/uninstall.sh"
-          chmod 0644 "$STAGE/zygisk/arm64-v8a.so" "$STAGE/zygisk/libc++_shared.so"
-          echo "=== .so info ==="
+          chmod 0644 "$STAGE/zygisk/arm64-v8a.so"
+          echo "=== final .so info ==="
           readelf -lW "$STAGE/zygisk/arm64-v8a.so" | grep LOAD
-          readelf -d "$STAGE/zygisk/arm64-v8a.so" | grep -E 'NEEDED|RELR' || true
+          readelf -d "$STAGE/zygisk/arm64-v8a.so" | grep -E 'NEEDED'
           nm -D "$STAGE/zygisk/arm64-v8a.so" | grep -E 'zygisk_module_entry'
           STAMP=$(date -u +%Y%m%d-%H%M%S)
-          ZIP="appspoof-and15-$STAMP.zip"
+          ZIP="appspoof-static-$STAMP.zip"
           ( cd "$STAGE" && zip -r -q "../../$ZIP" . -x '.*' )
           ls -la "$ZIP"
           sha256sum "$ZIP"
@@ -595,6 +448,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: appspoof-and15
-          path: appspoof-and15-*.zip
+          name: appspoof-static
+          path: appspoof-static-*.zip
           if-no-files-found: error
