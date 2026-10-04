@@ -1,0 +1,150 @@
+# APPSPOOF S00 r1 — Uji Alur
+name: AppSpoof S00 Uji Alur
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  s00:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Tulis header log
+        run: |
+          set -euo pipefail
+          : > s00.log
+          {
+            echo "== S00 r1 mulai =="
+            date -u +"%Y-%m-%dT%H:%M:%SZ"
+          } 2>&1 | tee -a s00.log
+
+      - name: Setup NDK r27
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27
+          add-to-path: true
+
+      - name: Info runner dan tool
+        run: |
+          set -euo pipefail
+          {
+            echo "== uname =="
+            uname -a
+            echo "== os-release =="
+            grep -E '^(NAME|VERSION)=' /etc/os-release || true
+            echo "== git =="
+            git --version || true
+            echo "== python3 =="
+            python3 --version || true
+            echo "== node =="
+            (node --version || echo "node: tidak ada")
+            echo "== curl =="
+            (curl --version | head -1 || true)
+            echo "== gh =="
+            (gh --version | head -1 || true)
+          } 2>&1 | tee -a s00.log
+
+      - name: Cek NDK r27
+        run: |
+          set -euo pipefail
+          {
+            echo "== ANDROID_NDK_HOME =="
+            echo "${ANDROID_NDK_HOME:-<kosong>}"
+            if [ -n "${ANDROID_NDK_HOME:-}" ] && [ -d "${ANDROID_NDK_HOME}" ]; then
+              echo "== source.properties =="
+              grep -E '^(Pkg.Revision|Pkg.Desc)' "${ANDROID_NDK_HOME}/source.properties" || true
+              TC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+              echo "== clang =="
+              ("$TC/clang" --version | head -3) || true
+              echo "== biner audit =="
+              ls "$TC" | grep -E '^(llvm-)?(readelf|nm|objdump)$' || true
+              echo "== aarch64 clang wrapper =="
+              ls "$TC"/aarch64-linux-android*clang 2>/dev/null | head -5 || true
+            else
+              echo "NDK r27 TIDAK ditemukan"
+            fi
+          } 2>&1 | tee -a s00.log
+
+      - name: Cek GitHub API dan rate limit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          {
+            echo "== rate_limit =="
+            gh api rate_limit 2>&1 | head -60
+            echo "== repo Antaru74/Random =="
+            gh api repos/Antaru74/Random 2>&1 | grep -E '"full_name"|"default_branch"|"message"' | head -5
+            echo "== repo ronardnx/penguin_frameworks_base =="
+            gh api repos/ronardnx/penguin_frameworks_base 2>&1 | grep -E '"full_name"|"default_branch"|"message"' | head -5
+            echo "== repo Project-PenguinOS/frameworks_base =="
+            gh api repos/Project-PenguinOS/frameworks_base 2>&1 | grep -E '"full_name"|"default_branch"|"message"' | head -5
+            echo "== repo Project-PenguinOS/packages_apps_Settings =="
+            gh api repos/Project-PenguinOS/packages_apps_Settings 2>&1 | grep -E '"full_name"|"default_branch"|"message"' | head -5
+          } 2>&1 | tee -a s00.log
+          exit 0
+
+      - name: Gate S00
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          RUN_ID: ${{ github.run_id }}
+          SHA_FULL: ${{ github.sha }}
+        run: |
+          set +e
+
+          NDK_OK="NO"
+          if [ -n "${ANDROID_NDK_HOME:-}" ] && [ -d "${ANDROID_NDK_HOME}" ]; then
+            NDK_OK="YES"
+          fi
+          if grep -q "NDK r27 TIDAK ditemukan" s00.log; then NDK_OK="NO"; fi
+
+          API_OK="NO"
+          if grep -q '"full_name": "Antaru74/Random"' s00.log; then API_OK="YES"; fi
+
+          RATE_REMAIN=$(grep -m1 '"remaining"' s00.log | sed -E 's/.*"remaining":[[:space:]]*([0-9]+).*/\1/' || echo "?")
+          RATE_LIMIT=$(grep -m1 '"limit"' s00.log | sed -E 's/.*"limit":[[:space:]]*([0-9]+).*/\1/' || echo "?")
+
+          SHA7=$(printf '%s' "${SHA_FULL}" | cut -c1-7)
+
+          GATE="PASS"
+          if [ "$NDK_OK" != "YES" ] || [ "$API_OK" != "YES" ]; then
+            GATE="FAIL"
+          fi
+
+          {
+            echo "=== APPSPOOF BLOK LAPOR ==="
+            echo "STAGE: S00 r1"
+            echo "GATE: ${GATE}"
+            echo "RUN: ${RUN_ID} ${SHA7}"
+            echo "RINGKAS:"
+            echo "- Runner: $(uname -m) kernel $(uname -r)"
+            echo "- Job status: ${JOB_STATUS}"
+            echo "- NDK r27 terpasang: ${NDK_OK}"
+            echo "- Akses API Antaru74/Random: ${API_OK}"
+            echo "- Rate limit: ${RATE_REMAIN}/${RATE_LIMIT} tersisa"
+            echo "- Log s00.log: $(wc -l < s00.log) baris"
+            echo "ARTIFACT: tidak ada"
+            echo "LANGKAH_USER:"
+            echo "1. Buka tab Summary run ini, salin seluruh blok ini ke chat."
+            echo "2. Bila GATE: FAIL, salin juga 60 baris terakhir log step 'Gate S00'."
+            echo "3. Jawab: 'lanjut S01' atau 'revisi S00'."
+            echo "=== AKHIR ==="
+          } > gate_report.txt
+
+          cat gate_report.txt
+          cat gate_report.txt >> "${GITHUB_STEP_SUMMARY}"
+
+          if [ "${GATE}" = "FAIL" ]; then
+            {
+              echo "--- 60 baris terakhir s00.log ---"
+              tail -n 60 s00.log
+              echo "--- akhir ---"
+            } | tee -a "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+          exit 0
