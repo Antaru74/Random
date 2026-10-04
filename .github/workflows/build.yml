@@ -938,40 +938,51 @@ jobs:
             "$CC" -std=c11 -O2 -fPIC -fvisibility=hidden -Wno-everything $EXTRA $INC_MOD -c "src/$f.c" -o "build/mod/$f.o"
           done
 
-          echo "== compile module .cpp =="
+          echo "== compile module .cpp (C++ tanpa libc++ runtime) =="
           for f in build_spoof hw_hooks zygisk_module companion; do
-            "$CXX" -std=c++17 -O2 -fPIC -fvisibility=hidden -fno-exceptions -fno-rtti -Wno-everything $EXTRA $INC_MOD -c "src/$f.cpp" -o "build/mod/$f.o"
+            "$CXX" -std=c++17 -O2 -fPIC -fvisibility=hidden \
+              -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit \
+              -nostdinc++ \
+              -Wno-everything $EXTRA $INC_MOD -c "src/$f.cpp" -o "build/mod/$f.o"
           done
 
-          echo "== link (static libc++, tidak butuh libc++_shared.so) =="
-          "$CXX" -shared -Wl,--gc-sections -Wl,--exclude-libs,ALL \
-            -static-libstdc++ \
-            -llog -o build/libzygisk.so build/mod/*.o
+          echo "== link (tanpa libc++_shared, TANPA static libc++) =="
+          "$CXX" -shared -nostdlib++ -fno-exceptions -fno-rtti \
+            -Wl,--gc-sections -Wl,--exclude-libs,ALL \
+            -Wl,--no-as-needed \
+            -llog -lc -ldl -lm \
+            -o build/libzygisk.so build/mod/*.o
 
           echo "--- pre-strip readelf ---"
           readelf -d build/libzygisk.so | grep -E 'NEEDED|RPATH|RUNPATH' || true
 
-          echo "== sanity: tidak boleh ada libc++_shared di NEEDED =="
+          echo "== sanity: tidak boleh libc++_shared di NEEDED =="
           if readelf -d build/libzygisk.so | grep -q 'libc++_shared'; then
-            echo "FAIL: libc++_shared masih NEEDED. Companion ZN akan gagal dlopen."
+            echo "FAIL: libc++_shared masih NEEDED"
             exit 1
           fi
           echo "OK: tidak ada libc++_shared"
 
-          echo "== sanity: tidak boleh ada symbol shadowhook =="
-          if nm -D build/libzygisk.so 2>/dev/null | grep -qi shadowhook; then
-            echo "FAIL: symbol shadowhook ditemukan"
+          echo "== sanity: tidak boleh ada undefined symbol mangled / cxa =="
+          if nm -D build/libzygisk.so 2>/dev/null | grep ' U ' | grep -qE '__cxa_|_Z'; then
+            echo "FAIL: undefined C++ runtime symbol ditemukan:"
+            nm -D build/libzygisk.so | grep ' U ' | grep -E '__cxa_|_Z'
             exit 1
+          fi
+          echo "OK: tidak ada C++ runtime symbol"
+
+          echo "== sanity: tidak boleh ada shadowhook =="
+          if nm -D build/libzygisk.so 2>/dev/null | grep -qi shadowhook; then
+            echo "FAIL: shadowhook symbol"; exit 1
           fi
           echo "OK: tidak ada shadowhook"
 
           echo "== sanity: tidak boleh ada RPATH/RUNPATH =="
           if readelf -d build/libzygisk.so 2>/dev/null | grep -qE 'RPATH|RUNPATH'; then
-            echo "WARN: RPATH terdeteksi, mencoba strip"
             patchelf --remove-rpath build/libzygisk.so || true
           fi
 
-          echo "== sanity: entry point harus ada =="
+          echo "== sanity: entry point ada =="
           nm -D build/libzygisk.so | grep -E 'zygisk_(module|companion)_entry' || { echo "FAIL: entry hilang"; exit 1; }
 
           echo "== strip =="
