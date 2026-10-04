@@ -9,11 +9,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Android NDK r26d
+      - name: Setup Android NDK r27
         uses: nttld/setup-ndk@v1
         id: ndk
         with:
-          ndk-version: r26d
+          ndk-version: r27
           add-to-path: true
 
       - name: Install tools
@@ -39,9 +39,6 @@ jobs:
           curl -fsSL -o docs/ref/custom_arrays.xml "$SET/res/values/custom_arrays.xml"
 
           echo "deps OK"
-
-          # Turunkan ZYGISK_API_VERSION ke 4
-          sed -i 's|^#define ZYGISK_API_VERSION 5$|#define ZYGISK_API_VERSION 4|' src/third_party/zygisk.hpp
           grep -n 'ZYGISK_API_VERSION' src/third_party/zygisk.hpp | head -n 3
 
       - name: Write source files (C + headers)
@@ -290,76 +287,19 @@ jobs:
 
           cat > src/hw_hooks.cpp <<'X_EOF'
           #include "hw_hooks.h"
-          #include "hw_values_gen.h"
           #include <string.h>
           #include <stdlib.h>
           #include <android/log.h>
 
           #define TAG "APPSPOOF"
           #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
-          #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 
           extern "C" {
-
-          static const struct appspoof_gpu_value *find_gpu(const char *k) {
-              if (!k || !*k) return 0;
-              for (int i = 0; i < appspoof_gpu_values_count; ++i)
-                  if (strcmp(appspoof_gpu_values[i].key, k) == 0) return &appspoof_gpu_values[i];
-              return 0;
-          }
-          static const struct appspoof_cpu_value *find_cpu(const char *k) {
-              if (!k || !*k) return 0;
-              for (int i = 0; i < appspoof_cpu_values_count; ++i)
-                  if (strcmp(appspoof_cpu_values[i].key, k) == 0) return &appspoof_cpu_values[i];
-              return 0;
-          }
-          static int set_static_string(JNIEnv *env, jclass cls,
-                                       const char *field, const char *value) {
-              if (!value || !*value) return 0;
-              jfieldID fid = env->GetStaticFieldID(cls, field, "Ljava/lang/String;");
-              if (!fid) { if (env->ExceptionCheck()) env->ExceptionClear(); return -1; }
-              jstring js = env->NewStringUTF(value);
-              if (!js) { if (env->ExceptionCheck()) env->ExceptionClear(); return -2; }
-              env->SetStaticObjectField(cls, fid, js);
-              env->DeleteLocalRef(js);
-              if (env->ExceptionCheck()) { env->ExceptionClear(); return -3; }
-              return 1;
-          }
-
           int appspoof_hw_apply(JNIEnv *env, const char *gpu_key, const char *cpu_key) {
-              if (!env) return -100;
-              if (!gpu_key) gpu_key = "";
-              if (!cpu_key) cpu_key = "";
-              int applied = 0;
-              if (gpu_key[0]) {
-                  const struct appspoof_gpu_value *g = find_gpu(gpu_key);
-                  if (g) {
-                      (void)setenv("SPOOF_GPU_RENDERER",     g->renderer,  1);
-                      (void)setenv("SPOOF_GPU_VENDOR",       g->vendor,    1);
-                      (void)setenv("SPOOF_VULKAN_DEVICE",    g->vk_device, 1);
-                      (void)setenv("SPOOF_VULKAN_VENDOR_ID", g->vk_vendor, 1);
-                      LOGI("[HW] GPU env key=%s renderer=%s", gpu_key, g->renderer);
-                      applied++;
-                  }
-              }
-              if (cpu_key[0]) {
-                  const struct appspoof_cpu_value *c = find_cpu(cpu_key);
-                  if (c) {
-                      jclass cls = env->FindClass("android/os/Build");
-                      if (cls) {
-                          if (set_static_string(env, cls, "HARDWARE",         c->hardware)  == 1) applied++;
-                          if (set_static_string(env, cls, "BOARD",            c->board)     == 1) applied++;
-                          if (set_static_string(env, cls, "SOC_MODEL",        c->soc_model) == 1) applied++;
-                          if (set_static_string(env, cls, "SOC_MANUFACTURER", c->soc_mfr)   == 1) applied++;
-                          env->DeleteLocalRef(cls);
-                          LOGI("[HW] CPU key=%s model=%s mfr=%s", cpu_key, c->soc_model, c->soc_mfr);
-                      }
-                  }
-              }
-              return applied;
+              (void)env; (void)gpu_key; (void)cpu_key;
+              return 0;
           }
-
-          } /* extern "C" */
+          }
           X_EOF
 
           cat > src/zygisk_module.cpp <<'X_EOF'
@@ -370,7 +310,6 @@ jobs:
           #include <android/log.h>
 
           #include "build_spoof.h"
-          #include "hw_hooks.h"
 
           #define APPSPOOF_TAG "APPSPOOF"
           #define L(level, stage, ...) \
@@ -378,9 +317,6 @@ jobs:
 
           static int  g_has_device = 0;
           static char g_device_code[64];
-          static int  g_has_hw = 0;
-          static char g_hw_gpu[64];
-          static char g_hw_cpu[64];
 
           class AppSpoofModule : public zygisk::ModuleBase {
           public:
@@ -389,8 +325,8 @@ jobs:
                   L(ANDROID_LOG_INFO, "BOOT", "onLoad zygisk API=%d", ZYGISK_API_VERSION);
               }
               void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
-                  g_has_device = 0; g_has_hw = 0;
-                  g_device_code[0] = '\0'; g_hw_gpu[0] = '\0'; g_hw_cpu[0] = '\0';
+                  g_has_device = 0;
+                  g_device_code[0] = '\0';
                   if (!args || !args->nice_name) { skip(); return; }
                   const char *nice = env->GetStringUTFChars(args->nice_name, nullptr);
                   if (!nice) { if (env->ExceptionCheck()) env->ExceptionClear(); skip(); return; }
@@ -404,7 +340,7 @@ jobs:
                   if (strcmp(pkg, "com.finalwire.aida64") == 0) {
                       g_has_device = 1;
                       strncpy(g_device_code, "RM11P", sizeof(g_device_code) - 1);
-                      L(ANDROID_LOG_INFO, "PRE", "HARDCODED TARGET pkg=%s code=RM11P", pkg);
+                      L(ANDROID_LOG_INFO, "PRE", "TARGET pkg=%s code=RM11P", pkg);
                   } else {
                       L(ANDROID_LOG_INFO, "PRE", "pkg=%s bukan target", pkg);
                       skip();
@@ -417,11 +353,6 @@ jobs:
                       int rc = appspoof_build_apply(env, g_device_code);
                       if (rc > 0) L(ANDROID_LOG_INFO, "POST-DEV", "code=%s fields=%d SUCCESS", g_device_code, rc);
                       else        L(ANDROID_LOG_ERROR, "POST-DEV", "code=%s rc=%d FAIL", g_device_code, rc);
-                  }
-                  if (g_has_hw) {
-                      int rc = appspoof_hw_apply(env, g_hw_gpu, g_hw_cpu);
-                      if (rc >= 0) L(ANDROID_LOG_INFO, "POST-HW", "gpu=%s cpu=%s fields=%d SUCCESS",
-                                     g_hw_gpu, g_hw_cpu, rc);
                   }
               }
           private:
@@ -539,21 +470,13 @@ jobs:
               f.write("};\n")
               f.write(f"static const int appspoof_presets_count = {len(prows)};\n")
 
-          with open("src/hw_values_gen.h", "w") as f:
-              f.write("#pragma once\nstruct appspoof_gpu_value { const char *key,*renderer,*vendor,*vk_device,*vk_vendor; };\n")
-              f.write("static const struct appspoof_gpu_value appspoof_gpu_values[1] = {{ \"\",\"\",\"\",\"\",\"\" }};\n")
-              f.write("static const int appspoof_gpu_values_count = 0;\n")
-              f.write("struct appspoof_cpu_value { const char *key,*hardware,*soc_model,*soc_mfr,*board; };\n")
-              f.write("static const struct appspoof_cpu_value appspoof_cpu_values[1] = {{ \"\",\"\",\"\",\"\",\"\" }};\n")
-              f.write("static const int appspoof_cpu_values_count = 0;\n")
-
           print(f"presets={len(prows)}")
           X_EOF
 
           python3 tools_extract_presets.py
           python3 tools_gen_headers.py
 
-      - name: Compile with Android NDK r26d
+      - name: Compile with Android NDK r27 (16KB align untuk Android 15)
         run: |
           set -e
           NDK="${ANDROID_NDK_HOME}"
@@ -561,6 +484,7 @@ jobs:
           SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           CC="$TCBIN/aarch64-linux-android24-clang"
           CXX="$TCBIN/aarch64-linux-android24-clang++"
+          STRIP="$TCBIN/llvm-strip"
           [ -x "$CC" ] && [ -x "$CXX" ] || { echo "FAIL clang"; exit 1; }
 
           INC_MOD="-Isrc -Isrc/third_party"
@@ -580,31 +504,41 @@ jobs:
               -Wno-everything $EXTRA $INC_MOD -c "src/$f.cpp" -o "build/mod/$f.o"
           done
 
-          echo "== link =="
+          echo "== link (16KB align + nopack-relative-relocs + no-undefined) =="
           "$CXX" -shared \
             -Wl,--gc-sections -Wl,--exclude-libs,ALL \
-            -Wl,--no-as-needed \
+            -Wl,-z,max-page-size=16384 \
             -Wl,-z,nopack-relative-relocs \
             -Wl,--hash-style=both \
             -o build/libzygisk.so build/mod/*.o
 
-          echo "--- readelf -d ---"
+          echo "--- readelf -lW (LOAD alignment) ---"
+          readelf -lW build/libzygisk.so | grep LOAD || true
+
+          echo "--- readelf -d (NEEDED/dynamic) ---"
           readelf -d build/libzygisk.so | grep -E 'NEEDED|RPATH|RUNPATH|RELR' || true
 
-          echo "== sanity check =="
+          echo "== sanity: align harus 0x4000 =="
+          ALIGN=$(readelf -lW build/libzygisk.so | grep LOAD | head -n 1 | awk '{print $NF}')
+          echo "align=$ALIGN"
+          if [ "$ALIGN" != "0x4000" ]; then
+            echo "FAIL: align bukan 0x4000 (16KB)"
+            exit 1
+          fi
+          echo "OK: 16KB align"
+
+          echo "== sanity: entry point =="
           nm -D build/libzygisk.so | grep -E 'zygisk_module_entry' || { echo "FAIL: entry hilang"; exit 1; }
 
-          echo "== strip debug saja (pertahankan .symtab) =="
-          "$CXX" -dumpversion >/dev/null 2>&1 || true
-          "$TCBIN/llvm-strip" --strip-debug build/libzygisk.so || strip --strip-debug build/libzygisk.so || true
+          echo "== strip =="
+          "$STRIP" --strip-debug build/libzygisk.so
           ls -la build/libzygisk.so
 
-          echo "== copy libc++_shared =="
+          echo "== bundle libc++_shared =="
           cp "$SYSROOT/usr/lib/aarch64-linux-android/libc++_shared.so" build/libc++_shared.so
-          ls -la build/libc++_shared.so
-
-          echo "== dump ZYGISK_API_VERSION =="
-          grep -n 'ZYGISK_API_VERSION' src/third_party/zygisk.hpp | head -n 3
+          "$STRIP" --strip-debug build/libc++_shared.so
+          echo "--- libc++_shared align ---"
+          readelf -lW build/libc++_shared.so | grep LOAD | head -n 3 || true
 
       - name: Write module files
         run: |
@@ -612,19 +546,19 @@ jobs:
           cat > module/module.prop <<'X_EOF'
           id=appspoof_zygisk
           name=AppSpoof
-          version=v1.0.0-api4
+          version=v1.0.0-and15
           versionCode=1
           author=APPSPOOF
-          description=Zygisk API v4 test — untuk kompatibilitas Zygisk Next 1.4.5.
+          description=Zygisk module for Android 15 — 16KB aligned, hardcoded test.
           X_EOF
 
           cat > module/customize.sh <<'X_EOF'
           #!/system/bin/sh
           SKIPUNZIP=0
-          ui_print "- APPSPOOF api4: customize"
+          ui_print "- APPSPOOF and15: customize"
           set_perm_recursive "$MODPATH" 0 0 0755 0644
           [ -d "$MODPATH/zygisk" ] && set_perm_recursive "$MODPATH/zygisk" 0 0 0755 0644
-          ui_print "- APPSPOOF api4: done"
+          ui_print "- APPSPOOF and15: done"
           X_EOF
 
           cat > module/uninstall.sh <<'X_EOF'
@@ -648,10 +582,11 @@ jobs:
           chmod 0755 "$STAGE/customize.sh" "$STAGE/uninstall.sh"
           chmod 0644 "$STAGE/zygisk/arm64-v8a.so" "$STAGE/zygisk/libc++_shared.so"
           echo "=== .so info ==="
-          readelf -d "$STAGE/zygisk/arm64-v8a.so" | grep -E 'NEEDED|RPATH|RUNPATH|RELR' || true
+          readelf -lW "$STAGE/zygisk/arm64-v8a.so" | grep LOAD
+          readelf -d "$STAGE/zygisk/arm64-v8a.so" | grep -E 'NEEDED|RELR' || true
           nm -D "$STAGE/zygisk/arm64-v8a.so" | grep -E 'zygisk_module_entry'
           STAMP=$(date -u +%Y%m%d-%H%M%S)
-          ZIP="appspoof-api4-$STAMP.zip"
+          ZIP="appspoof-and15-$STAMP.zip"
           ( cd "$STAGE" && zip -r -q "../../$ZIP" . -x '.*' )
           ls -la "$ZIP"
           sha256sum "$ZIP"
@@ -660,6 +595,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: appspoof-api4
-          path: appspoof-api4-*.zip
+          name: appspoof-and15
+          path: appspoof-and15-*.zip
           if-no-files-found: error
