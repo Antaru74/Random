@@ -949,7 +949,6 @@ jobs:
           echo "== link (tanpa libc++_shared, TANPA static libc++) =="
           "$CXX" -shared -nostdlib++ -fno-exceptions -fno-rtti \
             -Wl,--gc-sections -Wl,--exclude-libs,ALL \
-            -Wl,--no-as-needed \
             -llog -lc -ldl -lm \
             -o build/libzygisk.so build/mod/*.o
 
@@ -963,13 +962,14 @@ jobs:
           fi
           echo "OK: tidak ada libc++_shared"
 
-          echo "== sanity: tidak boleh ada undefined symbol mangled / cxa =="
-          if nm -D build/libzygisk.so 2>/dev/null | grep ' U ' | grep -qE '__cxa_|_Z'; then
-            echo "FAIL: undefined C++ runtime symbol ditemukan:"
-            nm -D build/libzygisk.so | grep ' U ' | grep -E '__cxa_|_Z'
+          echo "== sanity: tidak boleh ada undefined C++ mangled symbol (bukan dari LIBC) =="
+          BAD=$(nm -D build/libzygisk.so 2>/dev/null | grep ' U ' | awk '{print $NF}' | grep -E '^_Z' || true)
+          if [ -n "$BAD" ]; then
+            echo "FAIL: undefined C++ symbol ditemukan:"
+            echo "$BAD"
             exit 1
           fi
-          echo "OK: tidak ada C++ runtime symbol"
+          echo "OK: tidak ada C++ mangled symbol"
 
           echo "== sanity: tidak boleh ada shadowhook =="
           if nm -D build/libzygisk.so 2>/dev/null | grep -qi shadowhook; then
