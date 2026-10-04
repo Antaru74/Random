@@ -943,12 +943,20 @@ jobs:
             "$CXX" -std=c++17 -O2 -fPIC -fvisibility=hidden -fno-exceptions -fno-rtti -Wno-everything $EXTRA $INC_MOD -c "src/$f.cpp" -o "build/mod/$f.o"
           done
 
-          echo "== link =="
+          echo "== link (static libc++, tidak butuh libc++_shared.so) =="
           "$CXX" -shared -Wl,--gc-sections -Wl,--exclude-libs,ALL \
+            -static-libstdc++ \
             -llog -o build/libzygisk.so build/mod/*.o
 
           echo "--- pre-strip readelf ---"
           readelf -d build/libzygisk.so | grep -E 'NEEDED|RPATH|RUNPATH' || true
+
+          echo "== sanity: tidak boleh ada libc++_shared di NEEDED =="
+          if readelf -d build/libzygisk.so | grep -q 'libc++_shared'; then
+            echo "FAIL: libc++_shared masih NEEDED. Companion ZN akan gagal dlopen."
+            exit 1
+          fi
+          echo "OK: tidak ada libc++_shared"
 
           echo "== sanity: tidak boleh ada symbol shadowhook =="
           if nm -D build/libzygisk.so 2>/dev/null | grep -qi shadowhook; then
