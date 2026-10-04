@@ -1,0 +1,286 @@
+# =========================================================================
+# APPSPOOF — GitHub Actions build
+# BAGIAN 1 dari 3 (header + fetch deps + source C) — GABUNGKAN dengan BAGIAN 2 & 3
+# Nanti simpan sebagai .github/workflows/build.yml
+# =========================================================================
+name: Build AppSpoof
+on:
+  workflow_dispatch:
+    inputs:
+      zygisk_api:
+        description: 'Zygisk API version (4 atau 5)'
+        required: false
+        default: '5'
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27
+          add-to-path: true
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3 zip patchelf
+          python3 --version
+          echo "NDK=$ANDROID_NDK_HOME"
+
+      - name: Fetch external deps
+        run: |
+          set -e
+          mkdir -p src/third_party src/hw_templates docs/ref module/bin module/webroot
+          curl -fsSL -o src/third_party/zygisk.hpp \
+            "https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp"
+          git clone --depth=1 https://github.com/bytedance/android-inline-hook.git /tmp/sh
+          FW=54dcd6491b9f1c8612ae037ce94a0c6b22348bf4
+          BASE="https://raw.githubusercontent.com/ronardnx/penguin_frameworks_base/$FW/core/java/com/android/internal/util/custom"
+          curl -fsSL -o docs/ref/PerAppsPropsUtils.java       "$BASE/PerAppsPropsUtils.java"
+          curl -fsSL -o docs/ref/AdvancedAppSpoofUtils.java   "$BASE/AdvancedAppSpoofUtils.java"
+          SET="https://raw.githubusercontent.com/Project-PenguinOS/packages_apps_Settings/41697be08ff1bf2760f6a7ec318db61e9adbe9bb"
+          curl -fsSL -o docs/ref/custom_arrays.xml "$SET/res/values/custom_arrays.xml"
+          curl -fsSL -o docs/ref/HW_SPOOF.kt \
+            "https://raw.githubusercontent.com/Project-PenguinOS/packages_apps_Settings/5fe1711e707754b57dd66b69d987864b10c4ac6d/src/com/android/settings/system/spoofing/AdvancedAppSpoofSettings.kt"
+          echo "deps OK"
+          ls -la src/third_party docs/ref
+
+      - name: Write source files (C + headers)
+        run: |
+          set -e
+
+          cat > src/rules_common.h <<'X_EOF'
+          #ifndef APPSPOOF_RULES_COMMON_H
+          #define APPSPOOF_RULES_COMMON_H
+          #include <stdio.h>
+          static inline int appspoof_flag_read(const char *path) {
+              FILE *f = fopen(path, "r");
+              if (!f) return 0;
+              int c = fgetc(f);
+              fclose(f);
+              return c == '1' ? 1 : 0;
+          }
+          static inline int appspoof_flag_write(const char *path, int on) {
+              FILE *f = fopen(path, "w");
+              if (!f) return -1;
+              fputc(on ? '1' : '0', f);
+              fputc('\n', f);
+              if (fclose(f) != 0) return -1;
+              return 0;
+          }
+          #endif
+          X_EOF
+
+          cat > src/device_rules.h <<'X_EOF'
+          #ifndef APPSPOOF_DEVICE_RULES_H
+          #define APPSPOOF_DEVICE_RULES_H
+          #include <stddef.h>
+          #ifdef __cplusplus
+          extern "C" {
+          #endif
+          #define APPSPOOF_PKG_MAX    256
+          #define APPSPOOF_CODE_MAX   64
+          #define APPSPOOF_DEVICE_MAX 512
+          struct appspoof_device_rule {
+              char pkg[APPSPOOF_PKG_MAX];
+              char code[APPSPOOF_CODE_MAX];
+          };
+          struct appspoof_device_rules {
+              struct appspoof_device_rule items[APPSPOOF_DEVICE_MAX];
+              int count;
+          };
+          int appspoof_device_rules_load(const char *path, struct appspoof_device_rules *out);
+          const struct appspoof_device_rule *
+          appspoof_device_rules_find(const struct appspoof_device_rules *rules, const char *pkg);
+          #ifdef __cplusplus
+          }
+          #endif
+          #endif
+          X_EOF
+
+          cat > src/device_rules.c <<'X_EOF'
+          #include "device_rules.h"
+          #include <stdio.h>
+          #include <string.h>
+          static int copy_field(char *dst, size_t cap, const char *src) {
+              size_t len = strlen(src);
+              if (len >= cap) return -1;
+              memcpy(dst, src, len); dst[len] = '\0';
+              return 0;
+          }
+          int appspoof_device_rules_load(const char *path, struct appspoof_device_rules *out) {
+              if (!path || !out) return -1;
+              out->count = 0;
+              FILE *f = fopen(path, "r");
+              if (!f) return 0;
+              char line[1024]; int errors = 0;
+              while (fgets(line, sizeof(line), f)) {
+                  size_t n = strlen(line);
+                  int complete = (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r')) || feof(f);
+                  if (!complete) { int ch; while ((ch = fgetc(f)) != EOF && ch != '\n') {} errors++; continue; }
+                  while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = '\0';
+                  if (n == 0 || line[0] == '#') continue;
+                  char *tab = strchr(line, '\t');
+                  if (!tab) { errors++; continue; }
+                  *tab = '\0';
+                  char *pkg = line; char *code = tab + 1;
+                  if (strchr(code, '\t')) { errors++; continue; }
+                  if (pkg[0] == '\0' || code[0] == '\0') { errors++; continue; }
+                  if (out->count >= APPSPOOF_DEVICE_MAX) { errors++; break; }
+                  struct appspoof_device_rule *r = &out->items[out->count];
+                  if (copy_field(r->pkg,  sizeof(r->pkg),  pkg)  < 0) { errors++; continue; }
+                  if (copy_field(r->code, sizeof(r->code), code) < 0) { errors++; continue; }
+                  out->count++;
+              }
+              fclose(f);
+              return errors ? -errors : 0;
+          }
+          const struct appspoof_device_rule *
+          appspoof_device_rules_find(const struct appspoof_device_rules *rules, const char *pkg) {
+              if (!rules || !pkg) return 0;
+              for (int i = 0; i < rules->count; ++i)
+                  if (strcmp(rules->items[i].pkg, pkg) == 0) return &rules->items[i];
+              return 0;
+          }
+          X_EOF
+
+          cat > src/hw_rules.h <<'X_EOF'
+          #ifndef APPSPOOF_HW_RULES_H
+          #define APPSPOOF_HW_RULES_H
+          #include <stddef.h>
+          #ifdef __cplusplus
+          extern "C" {
+          #endif
+          #define APPSPOOF_HW_PKG_MAX  256
+          #define APPSPOOF_HW_KEY_MAX  64
+          #define APPSPOOF_HW_MAX      512
+          struct appspoof_hw_rule {
+              char pkg[APPSPOOF_HW_PKG_MAX];
+              char gpu[APPSPOOF_HW_KEY_MAX];
+              char cpu[APPSPOOF_HW_KEY_MAX];
+          };
+          struct appspoof_hw_rules {
+              struct appspoof_hw_rule items[APPSPOOF_HW_MAX];
+              int count;
+          };
+          int appspoof_hw_rules_load(const char *path, struct appspoof_hw_rules *out);
+          const struct appspoof_hw_rule *
+          appspoof_hw_rules_find(const struct appspoof_hw_rules *rules, const char *pkg);
+          #ifdef __cplusplus
+          }
+          #endif
+          #endif
+          X_EOF
+
+          cat > src/hw_rules.c <<'X_EOF'
+          #include "hw_rules.h"
+          #include <stdio.h>
+          #include <string.h>
+          static int copy_field(char *dst, size_t cap, const char *src) {
+              size_t len = strlen(src);
+              if (len >= cap) return -1;
+              memcpy(dst, src, len); dst[len] = '\0';
+              return 0;
+          }
+          int appspoof_hw_rules_load(const char *path, struct appspoof_hw_rules *out) {
+              if (!path || !out) return -1;
+              out->count = 0;
+              FILE *f = fopen(path, "r");
+              if (!f) return 0;
+              char line[1024]; int errors = 0;
+              while (fgets(line, sizeof(line), f)) {
+                  size_t n = strlen(line);
+                  int complete = (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r')) || feof(f);
+                  if (!complete) { int ch; while ((ch = fgetc(f)) != EOF && ch != '\n') {} errors++; continue; }
+                  while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = '\0';
+                  if (n == 0 || line[0] == '#') continue;
+                  char *t1 = strchr(line, '\t'); if (!t1) { errors++; continue; }
+                  *t1 = '\0';
+                  char *pkg = line; char *rest = t1 + 1;
+                  char *t2 = strchr(rest, '\t'); if (!t2) { errors++; continue; }
+                  *t2 = '\0';
+                  char *gpu = rest; char *cpu = t2 + 1;
+                  if (strchr(cpu, '\t')) { errors++; continue; }
+                  if (pkg[0] == '\0') { errors++; continue; }
+                  if (out->count >= APPSPOOF_HW_MAX) { errors++; break; }
+                  struct appspoof_hw_rule *r = &out->items[out->count];
+                  if (copy_field(r->pkg, sizeof(r->pkg), pkg) < 0) { errors++; continue; }
+                  if (copy_field(r->gpu, sizeof(r->gpu), gpu) < 0) { errors++; continue; }
+                  if (copy_field(r->cpu, sizeof(r->cpu), cpu) < 0) { errors++; continue; }
+                  out->count++;
+              }
+              fclose(f);
+              return errors ? -errors : 0;
+          }
+          const struct appspoof_hw_rule *
+          appspoof_hw_rules_find(const struct appspoof_hw_rules *rules, const char *pkg) {
+              if (!rules || !pkg) return 0;
+              for (int i = 0; i < rules->count; ++i)
+                  if (strcmp(rules->items[i].pkg, pkg) == 0) return &rules->items[i];
+              return 0;
+          }
+          X_EOF
+
+          cat > src/companion_proto.h <<'X_EOF'
+          #ifndef APPSPOOF_COMPANION_PROTO_H
+          #define APPSPOOF_COMPANION_PROTO_H
+          #include <stdint.h>
+          #define APPSPOOF_CP_PKG_MAX  256
+          #define APPSPOOF_CP_CODE_MAX 64
+          #define APPSPOOF_CP_KEY_MAX  64
+          struct companion_reply {
+              uint8_t disabled;
+              uint8_t has_device;
+              uint8_t has_hw;
+              uint8_t _pad;
+              char device_code[APPSPOOF_CP_CODE_MAX];
+              char hw_gpu[APPSPOOF_CP_KEY_MAX];
+              char hw_cpu[APPSPOOF_CP_KEY_MAX];
+          };
+          #endif
+          X_EOF
+
+          cat > src/build_spoof.h <<'X_EOF'
+          #ifndef APPSPOOF_BUILD_SPOOF_H
+          #define APPSPOOF_BUILD_SPOOF_H
+          #include <jni.h>
+          #ifdef __cplusplus
+          extern "C" {
+          #endif
+          int appspoof_build_apply(JNIEnv *env, const char *preset_code);
+          #ifdef __cplusplus
+          }
+          #endif
+          #endif
+          X_EOF
+
+          cat > src/hw_hooks.h <<'X_EOF'
+          #ifndef APPSPOOF_HW_HOOKS_H
+          #define APPSPOOF_HW_HOOKS_H
+          #include <jni.h>
+          #ifdef __cplusplus
+          extern "C" {
+          #endif
+          int appspoof_hw_apply(JNIEnv *env, const char *gpu_key, const char *cpu_key);
+          #ifdef __cplusplus
+          }
+          #endif
+          #endif
+          X_EOF
+
+          cat > src/zygisk_compat.h <<'X_EOF'
+          #ifndef APPSPOOF_ZYGISK_COMPAT_H
+          #define APPSPOOF_ZYGISK_COMPAT_H
+          #include <sys/types.h>
+          #include <zygisk.hpp>
+          #endif
+          X_EOF
+
+          echo "C sources OK"
+          ls -la src/
