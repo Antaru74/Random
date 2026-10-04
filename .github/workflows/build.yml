@@ -46,25 +46,10 @@ jobs:
             "https://raw.githubusercontent.com/Project-PenguinOS/packages_apps_Settings/5fe1711e707754b57dd66b69d987864b10c4ac6d/src/com/android/settings/system/spoofing/AdvancedAppSpoofSettings.kt"
 
           echo "deps OK"
-          ls -la src/third_party docs/ref
 
       - name: Write source files (C + headers)
         run: |
           set -e
-
-          cat > src/rules_common.h <<'X_EOF'
-          #ifndef APPSPOOF_RULES_COMMON_H
-          #define APPSPOOF_RULES_COMMON_H
-          #include <stdio.h>
-          static inline int appspoof_flag_read(const char *path) {
-              FILE *f = fopen(path, "r");
-              if (!f) return 0;
-              int c = fgetc(f);
-              fclose(f);
-              return c == '1' ? 1 : 0;
-          }
-          #endif
-          X_EOF
 
           cat > src/device_rules.h <<'X_EOF'
           #ifndef APPSPOOF_DEVICE_RULES_H
@@ -426,7 +411,6 @@ jobs:
                   if (pkg[0] == '\0') { skip(); return; }
                   L(ANDROID_LOG_INFO, "PRE", "pkg=%s", pkg);
 
-                  /* KONFIG HARDCODE untuk test: com.finalwire.aida64 -> RM11P */
                   if (strcmp(pkg, "com.finalwire.aida64") == 0) {
                       g_has_device = 1;
                       strncpy(g_device_code, "RM11P", sizeof(g_device_code) - 1);
@@ -461,7 +445,7 @@ jobs:
           REGISTER_ZYGISK_MODULE(AppSpoofModule)
           X_EOF
 
-          echo "C++ sources OK (companion removed)"
+          echo "C++ sources OK"
           ls -la src/
 
       - name: Write Python extractors
@@ -747,12 +731,12 @@ jobs:
           set -e
           NDK="${ANDROID_NDK_HOME}"
           TCBIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           CC="$TCBIN/aarch64-linux-android24-clang"
           CXX="$TCBIN/aarch64-linux-android24-clang++"
           STRIP="$TCBIN/llvm-strip"
-          [ -x "$CC" ]  || { echo "FAIL: $CC tidak ada"; ls "$TCBIN" | head; exit 1; }
+          [ -x "$CC" ]  || { echo "FAIL: $CC tidak ada"; exit 1; }
           [ -x "$CXX" ] || { echo "FAIL: $CXX tidak ada"; exit 1; }
-          [ -x "$STRIP" ] || { echo "FAIL: $STRIP tidak ada"; exit 1; }
 
           INC_MOD="-Isrc -Isrc/third_party"
           EXTRA="-include sys/types.h"
@@ -764,23 +748,32 @@ jobs:
             "$CC" -std=c11 -O2 -fPIC -fvisibility=hidden -Wno-everything $EXTRA $INC_MOD -c "src/$f.c" -o "build/mod/$f.o"
           done
 
-          echo "== compile module .cpp (pakai libc++_shared via NEEDED) =="
+          echo "== compile module .cpp =="
           for f in build_spoof hw_hooks zygisk_module; do
             "$CXX" -std=c++17 -O2 -fPIC -fvisibility=hidden \
               -fno-exceptions -fno-rtti \
               -Wno-everything $EXTRA $INC_MOD -c "src/$f.cpp" -o "build/mod/$f.o"
           done
 
-          echo "== link (dengan libc++_shared di NEEDED — supaya tidak bootloop) =="
-          "$CXX" -shared -Wl,--gc-sections -Wl,--exclude-libs,ALL \
+          echo "== link (dengan nopack-relative-relocs untuk ZN builtin linker) =="
+          "$CXX" -shared \
+            -Wl,--gc-sections -Wl,--exclude-libs,ALL \
             -Wl,--no-as-needed \
+            -Wl,-z,nopack-relative-relocs \
             -o build/libzygisk.so build/mod/*.o
 
           echo "--- pre-strip readelf ---"
-          readelf -d build/libzygisk.so | grep -E 'NEEDED|RPATH|RUNPATH' || true
+          readelf -d build/libzygisk.so | grep -E 'NEEDED|RPATH|RUNPATH|RELR|RELRSZ' || true
 
           echo "== sanity: entry point ada =="
           nm -D build/libzygisk.so | grep -E 'zygisk_module_entry' || { echo "FAIL: entry hilang"; exit 1; }
+
+          echo "== sanity: cek ada DT_RELR (harus kosong) =="
+          if readelf -d build/libzygisk.so | grep -q 'RELR'; then
+            echo "WARN: DT_RELR masih ada"
+          else
+            echo "OK: tidak ada DT_RELR"
+          fi
 
           echo "== strip =="
           cp build/libzygisk.so build/libzygisk.so.bak
@@ -789,8 +782,12 @@ jobs:
 
           echo "--- post-strip readelf ---"
           readelf -d build/libzygisk.so | grep -E 'NEEDED|RPATH|RUNPATH' || true
-          echo "--- post-strip symbols ---"
-          nm -D build/libzygisk.so | grep -E 'zygisk_module_entry'
+
+          echo "== copy libc++_shared.so dari NDK =="
+          cp "$SYSROOT/usr/lib/aarch64-linux-android/libc++_shared.so" build/libc++_shared.so
+          "$STRIP" --strip-all build/libc++_shared.so
+          ls -la build/libc++_shared.so
+          readelf -d build/libc++_shared.so | grep -E 'NEEDED|RPATH|RUNPATH' || true
 
       - name: Write module files
         run: |
@@ -798,19 +795,19 @@ jobs:
           cat > module/module.prop <<'X_EOF'
           id=appspoof_zygisk
           name=AppSpoof
-          version=v1.0.0-minimal
+          version=v1.0.0-trial2
           versionCode=1
           author=APPSPOOF
-          description=Minimal Zygisk module — test preload only. Config hardcoded.
+          description=Minimal Zygisk module — libc++_shared bundled, nopack-relative-relocs.
           X_EOF
 
           cat > module/customize.sh <<'X_EOF'
           #!/system/bin/sh
           SKIPUNZIP=0
-          ui_print "- APPSPOOF minimal: customize"
+          ui_print "- APPSPOOF trial2: customize"
           set_perm_recursive "$MODPATH" 0 0 0755 0644
           [ -d "$MODPATH/zygisk" ] && set_perm_recursive "$MODPATH/zygisk" 0 0 0755 0644
-          ui_print "- APPSPOOF minimal: done"
+          ui_print "- APPSPOOF trial2: done"
           X_EOF
 
           cat > module/uninstall.sh <<'X_EOF'
@@ -829,9 +826,11 @@ jobs:
           cp module/module.prop  "$STAGE/"
           cp module/customize.sh "$STAGE/"
           cp module/uninstall.sh "$STAGE/"
-          cp build/libzygisk.so "$STAGE/zygisk/arm64-v8a.so"
+          cp build/libzygisk.so        "$STAGE/zygisk/arm64-v8a.so"
+          cp build/libc++_shared.so    "$STAGE/zygisk/libc++_shared.so"
           chmod 0755 "$STAGE/customize.sh" "$STAGE/uninstall.sh"
           chmod 0644 "$STAGE/zygisk/arm64-v8a.so"
+          chmod 0644 "$STAGE/zygisk/libc++_shared.so"
           echo "=== struktur ==="
           find "$STAGE" -type f | sort
           echo ""
@@ -840,7 +839,7 @@ jobs:
           nm -D "$STAGE/zygisk/arm64-v8a.so" | grep -E 'zygisk_module_entry'
           echo ""
           STAMP=$(date -u +%Y%m%d-%H%M%S)
-          ZIP="appspoof-minimal-$STAMP.zip"
+          ZIP="appspoof-trial2-$STAMP.zip"
           ( cd "$STAGE" && zip -r -q "../../$ZIP" . -x '.*' )
           ls -la "$ZIP"
           sha256sum "$ZIP"
@@ -849,6 +848,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: appspoof-minimal
-          path: appspoof-minimal-*.zip
+          name: appspoof-trial2
+          path: appspoof-trial2-*.zip
           if-no-files-found: error
